@@ -1,0 +1,18 @@
+# secrets
+.env
+
+# python
+__pycache__/
+*.pyc
+
+# venv
+.venv/
+
+# os junk
+.DS_Store
+
+# app state (данные хакатона можно хранить локально, но не пушить)
+points.json
+submissions.json
+reviews.json
+
