@@ -1,0 +1,58 @@
+[
+  {
+    "assignment_id": "dz1",
+    "title": "ДЗ 1: Основы ML",
+    "questions": [
+      {
+        "question_id": "q1",
+        "title": "Объясните bias-variance tradeoff",
+        "max_points": 40,
+        "keywords": [
+          {"word": "bias", "points": 10},
+          {"word": "variance", "points": 10},
+          {"word": "overfitting", "points": 10},
+          {"word": "underfitting", "points": 10}
+        ]
+      },
+      {
+        "question_id": "q2",
+        "title": "Что такое переобучение и как его уменьшить?",
+        "max_points": 30,
+        "keywords": [
+          {"word": "регуляризация", "points": 10},
+          {"word": "валидация", "points": 10},
+          {"word": "dropout", "points": 10}
+        ]
+      },
+      {
+        "question_id": "q3",
+        "title": "Поясните k-fold cross-validation",
+        "max_points": 30,
+        "keywords": [
+          {"word": "разбиение", "points": 10},
+          {"word": "k", "points": 10},
+          {"word": "среднее", "points": 10}
+        ]
+      }
+    ]
+  },
+
+  {
+    "assignment_id": "newton_laws_01",
+    "title": "Законы Ньютона (кратко)",
+    "questions": [
+      {
+        "question_id": "q1",
+        "title": "Сформулируйте три закона Ньютона",
+        "max_points": 100,
+        "keywords": [
+          {"word": "инерция", "points": 20},
+          {"word": "сила", "points": 20},
+          {"word": "ускорение", "points": 20},
+          {"word": "противоположно равна", "points": 20},
+          {"word": "масса", "points": 20}
+        ]
+      }
+    ]
+  }
+]
