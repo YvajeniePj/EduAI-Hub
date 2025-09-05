@@ -44,7 +44,7 @@ EduAI-Hub/
 ├─ submissions.json     # сдачи студентов (автогенерируется)
 ├─ reviews.json         # отзывы peer-review (автогенерируется)
 ├─ requirements.txt     # зависимости
-└─  .env                 # приватные ключи API
+└─  .env                # приватные ключи API
 ```
 
 ---
