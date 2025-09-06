@@ -20,6 +20,32 @@ POINTS_PATH = "points.json"
 SUBM_PATH   = "submissions.json"
 REVIEWS_PATH = "reviews.json"
 
+def current_subject() -> str:
+    return st.session_state.get("subject", "General")
+
+def assignment_selector(widget_key: str):
+    subj = current_subject()
+    sub_rubrics = [r for r in RUBRICS if r.get("subject", "General") == subj]
+    if not sub_rubrics:
+        st.warning("Для этого предмета пока нет заданий.")
+        st.stop()
+    id_to_r = {r["assignment_id"]: r for r in sub_rubrics}
+    ids = list(id_to_r.keys())
+
+    cur = st.session_state.get("assign_id", ids[0])
+    if cur not in ids:
+        cur = ids[0]
+
+    rid = st.selectbox(
+        "Задание:",
+        options=ids,
+        index=ids.index(cur),
+        format_func=lambda rid: id_to_r[rid]["title"],
+        key=widget_key,
+    )
+    st.session_state["assign_id"] = rid
+    return id_to_r[rid]
+
 def submission_preview(s: dict, max_len: int = 60) -> str:
     """Короткий текст для списка выбора в кросс-проверке.
     Поддерживает старые ('answer') и новые ('answers'=[...]) форматы."""
@@ -54,7 +80,52 @@ def badge_for(points: int) -> str:
     if points >= 30: return "🥇 Consistent"
     if points >= 15: return "🥈 Getting There"
     if points >= 5:  return "🥉 Starter"
-    return "🌱 New"
+    return "🌱 Rookie"
+
+def migrate_stores_to_subject_scope():
+    # был dict user->points, теперь dict subject->(dict user->points)
+    if isinstance(st.session_state.points, dict) and st.session_state.points and \
+       all(isinstance(v, int) for v in st.session_state.points.values()):
+        st.session_state.points = {"General": st.session_state.points}
+        save_json(POINTS_PATH, st.session_state.points)
+
+    # dict subject->list
+    if isinstance(st.session_state.submissions, list):
+        st.session_state.submissions = {"General": st.session_state.submissions}
+        save_json(SUBM_PATH, st.session_state.submissions)
+
+    # dict subject->list
+    if isinstance(st.session_state.reviews, list):
+        st.session_state.reviews = {"General": st.session_state.reviews}
+        save_json(REVIEWS_PATH, st.session_state.reviews)
+
+def get_points_store() -> dict:
+    subj = current_subject()
+    if subj not in st.session_state.points:
+        st.session_state.points[subj] = {}
+    return st.session_state.points[subj]
+
+def save_points_store():
+    save_json(POINTS_PATH, st.session_state.points)
+
+def get_submissions_store() -> list:
+    subj = current_subject()
+    if subj not in st.session_state.submissions:
+        st.session_state.submissions[subj] = []
+    return st.session_state.submissions[subj]
+
+def save_submissions_store():
+    save_json(SUBM_PATH, st.session_state.submissions)
+
+def get_reviews_store() -> list:
+    subj = current_subject()
+    if subj not in st.session_state.reviews:
+        st.session_state.reviews[subj] = []
+    return st.session_state.reviews[subj]
+
+def save_reviews_store():
+    save_json(REVIEWS_PATH, st.session_state.reviews)
+
 
 
 st.set_page_config(page_title="EduAI Hub (Mini)", page_icon="🎓", layout="wide")
@@ -99,7 +170,7 @@ div.stButton > button {
 </style>
 """, unsafe_allow_html=True)
 
-st.title("EduAI Hub — мини-прототип")
+st.title("EduAI Hub — платформа для эффективного обучения")
 st.divider()
 
 
@@ -111,6 +182,7 @@ if "submissions" not in st.session_state:
 if "reviews" not in st.session_state:
     st.session_state.reviews = load_json(REVIEWS_PATH, [])
 
+migrate_stores_to_subject_scope()
 
 # --- load rubric
 with open("rubric.json", "r", encoding="utf-8") as f:
@@ -180,17 +252,23 @@ def llm_grade(answer_text: str, rubric: dict) -> dict | None:
         return None
 
 def award_points(user: str, pts: int):
-    st.session_state.points[user] = st.session_state.points.get(user, 0) + pts
+    pts_store = get_points_store()
+    pts_store[user] = pts_store.get(user, 0) + pts
 
 def peer_avg_for_submission(subm_idx: int):
-    """Return average 1–5 score and count for a submission index."""
-    scores = [r["avg_score"] for r in st.session_state.reviews if r["submission_idx"] == subm_idx]
+    reviews = get_reviews_store()
+    scores = [r["avg_score"] for r in reviews if r["submission_idx"] == subm_idx]
     return (round(mean(scores), 2), len(scores)) if scores else (None, 0)
 
 # --- sidebar "login"
 st.sidebar.markdown("### ⚙️ Настройки")
 st.sidebar.header("Профиль")
 user = st.sidebar.text_input("Ваше имя (для лидерборда)", value="Student")
+
+# --- subject picker
+SUBJECTS = sorted({ r.get("subject", "General") for r in RUBRICS })
+subject = st.sidebar.selectbox("Предмет", SUBJECTS, key="subject")
+
 
 use_ai = st.sidebar.checkbox("Включить AI-оценку (опционально)", value=True)
 st.session_state["use_ai"] = bool(use_ai)  # <-- ВАЖНО: кладём флаг в session_state
@@ -211,41 +289,38 @@ st.sidebar.divider()
 st.sidebar.markdown("**О проекте**\n\nМини-платформа для проверки ДЗ и кросс-оценки. Экспорт в CSV, бейджи за активность.")
 
 tab_submit, tab_leaderboard, tab_peer, tab_chat = st.tabs(
-    ["📝 Ответ", "🏆 Лидерборд", "🤝 Кросс-проверка", "💬 Чат-ассистент (демо)"]
+    ["📝 Мои задания", "🏆 Лидерборд", "🤝 Кросс-проверка", "💬 Чат-ассистент (демо)"]
 )
-st.subheader("Выбор задания")
-assign_id = st.selectbox(
-    "Задание:",
-    options=[r["assignment_id"] for r in RUBRICS],
-    format_func=lambda rid: id_to_rubric[rid]["title"]
-)
-RUBRIC = id_to_rubric[assign_id]
 
 with tab_peer:
 
     st.subheader("Кросс-проверка (анонимно)")
+    st.subheader("Выбор задания")
+    RUBRIC = assignment_selector("assign_id_peer")
+    st.subheader("Ответы на вопросы задания")
 
     # Pick which assignment to review (reuse current selection)
     st.caption("Выберите задание для проверки (совпадает с селектором выше).")
     # We already have assign_id and RUBRIC bound from the selector section.
 
-    # Build candidate submissions: same assignment, not mine
+    # Build candidate submissions
+    subs = get_submissions_store()
     all_subms = [
-        (idx, s) for idx, s in enumerate(st.session_state.submissions)
-        if s["assignment"] == RUBRIC["assignment_id"] and s["user"] != user
+        (idx, s) for idx, s in enumerate(subs)
+        if s.get("assignment") == RUBRIC["assignment_id"] and s.get("user") != user
     ]
 
     if not all_subms:
         st.info("Пока нет чужих ответов по этому заданию.")
     else:
         # Show a simple picker
-        options = [
-            f"#{idx} — {s['user']}: {submission_preview(s)}"
-            for idx, s in all_subms
-        ]
-        choice = st.selectbox("Выберите ответ для проверки:", options)
-        pick_idx = all_subms[options.index(choice)][0]
-        pick = st.session_state.submissions[pick_idx]
+        option_indices = [idx for idx, _ in all_subms]
+        labels = [f"#{idx} — {s.get('user','?')}: {submission_preview(s)}" for idx, s in all_subms]
+        sel = st.selectbox("Выберите ответ для проверки:", options=range(len(option_indices)),
+                        format_func=lambda i: labels[i])
+        pick_idx = option_indices[sel]
+        pick = subs[pick_idx]
+
 
         st.write("Ответ студента")
         if "answer" in pick:
@@ -261,7 +336,6 @@ with tab_peer:
                 st.markdown("<hr style='border:none;border-top:1px solid #eee;margin:8px 0;' />", unsafe_allow_html=True)
         else:
             st.write("Ответ отсутствует.")
-        st.markdown('</div>', unsafe_allow_html=True)
 
 
         st.markdown("### Оцените по критериям (1–5)")
@@ -281,7 +355,7 @@ with tab_peer:
             review = {
                 "submission_idx": pick_idx,
                 "assignment": RUBRIC["assignment_id"],
-                "reviewer": user,             # можно хранить; показывать — нет
+                "reviewer": user,          
                 "scores": {
                     "relevance": sc_relevance,
                     "structure": sc_structure,
@@ -291,35 +365,49 @@ with tab_peer:
                 "avg_score": avg_score,
                 "comment": comment.strip()
             }
-            st.session_state.reviews.append(review)
-            # Persist and reward reviewer with +1 point
-            save_json(REVIEWS_PATH, st.session_state.reviews)
+            reviews = get_reviews_store()
+            reviews.append(review)
+            save_reviews_store()
+
             award_points(user, 1)
-            save_json(POINTS_PATH, st.session_state.points)
+            save_points_store()
             st.success("Отзыв сохранен! Вам начислено +1 очко за кросс-проверку.")
 
     st.markdown("---")
     st.subheader("Мои полученные отзывы")
-    # Find my submissions for this assignment
+    subs = get_submissions_store()
     my_subms = [
-        (idx, s) for idx, s in enumerate(st.session_state.submissions)
-        if s["assignment"] == RUBRIC["assignment_id"] and s["user"] == user
+        (i, s) for i, s in enumerate(subs)
+        if s.get("assignment") == RUBRIC["assignment_id"] and s.get("user") == user
     ]
+    reviews = get_reviews_store()
+
     if not my_subms:
         st.write("Вы ещё не сдавали это задание.")
     else:
         for idx, s in my_subms:
             avg, cnt = peer_avg_for_submission(idx)
-            st.markdown(f"**Сдача #{idx}** — peer-оценок: {cnt}" + (f", среднее: **{avg}/5**" if avg is not None else ""))
-            # show last few comments
-            comments = [r["comment"] for r in st.session_state.reviews if r["submission_idx"] == idx and r["comment"]]
+            st.markdown(
+                f"**Сдача #{idx}** — peer-оценок: {cnt}"
+                + (f", среднее: **{avg}/5**" if avg is not None else "")
+            )
+            # последние комментарии по этой сдаче
+            comments = [
+                r.get("comment") for r in reviews
+                if isinstance(r, dict)
+                and r.get("submission_idx") == idx
+                and r.get("comment")
+            ]
             if comments:
                 with st.expander("Комментарии"):
                     for c in comments[-5:]:
                         st.write("•", c)
 
+
 with tab_submit:
-    st.subheader("Ответы на вопросы задания")
+
+    st.subheader("Выбор задания")
+    RUBRIC = assignment_selector("assign_id_submit")
 
     # RUBRIC is bound from the assignment selector (as before)
     questions = RUBRIC.get("questions", [])
@@ -414,9 +502,11 @@ with tab_submit:
             pct = total_score / max(1, total_max)
             gained = max(1, int(round(pct * 10)))
             award_points(user, gained)
+            save_points_store()
 
             # Save a multi-question submission
-            st.session_state.submissions.append({
+            subs = get_submissions_store()
+            subs.append({
                 "user": user,
                 "assignment": RUBRIC["assignment_id"],
                 "answers": [
@@ -430,54 +520,73 @@ with tab_submit:
                 "total_max": total_max,
                 "points_awarded": gained
             })
-
-            # persist
-            save_json(POINTS_PATH, st.session_state.points)
-            save_json(SUBM_PATH, st.session_state.submissions)
+            save_submissions_store()
 
             st.info(f"Начислено {gained} очк.")
 
 
 with tab_leaderboard:
-    st.subheader("Лидерборд")
-    if not st.session_state.points:
+    st.subheader(f"Лидерборд — {current_subject()}")
+    pts = get_points_store()
+    if not pts:
         st.write("Пока пусто.")
     else:
-        board = sorted(st.session_state.points.items(), key=lambda x: x[1], reverse=True)
+        board = sorted(pts.items(), key=lambda x: x[1], reverse=True)
         for i, (u, p) in enumerate(board, start=1):
             st.write(f"{i}. **{u}** — {p} очк. {badge_for(p)}")
 
+     # описание уровней
+    st.markdown("### 🏅 Значки и уровни")
+    st.markdown("""
+    - 🌱 **Rookie** — 0–4 очка. Начало пути!
+    - 🥉 **Starter** — 5–14 очков. Первые шаги.
+    - 🥈 **Getting There** — 15–29 очков. Хороший прогресс.
+    - 🥇 **Consistent** — 30–49 очков. Стабильные результаты.
+    - 🏅 **Power Learner** — 50+ очков. Отличная вовлечённость!
+    """)
+
+    subs = get_submissions_store()
     with st.expander("Последние сдачи"):
-        if not st.session_state.submissions:
+        if not subs:
             st.write("Нет сдач.")
         else:
-            for s in reversed(st.session_state.submissions[-10:]):
-                if "total_score" in s:
-                    summary = f"{s['total_score']}/{s['total_max']}"
-                else:
-                    summary = str(s.get("score", "?"))
+            for s in reversed(subs[-10:]):
+                summary = f"{s['total_score']}/{s['total_max']}" if "total_score" in s else str(s.get("score","?"))
                 preview = submission_preview(s, max_len=40)
                 st.markdown(f"- **{s['user']}** → {summary}  <span class='muted'>(+{s['points_awarded']} очк.)</span>  — {preview}", unsafe_allow_html=True)
 
+    # Экспорт по предмету
+    pts = get_points_store()
+    subs = get_submissions_store()
+    revs = get_reviews_store()
 
-    # Build dataframes to export CSV files
-    df_points = pd.DataFrame(
-        [{"user": u, "points": p} for u, p in st.session_state.points.items()]
-    ).sort_values("points", ascending=False)
+    if pts:
+        df_points = pd.DataFrame([{"user": u, "points": p} for u, p in pts.items()]).sort_values(
+            "points", ascending=False
+        )
+    else:
+        df_points = pd.DataFrame(columns=["user", "points"])
 
-    df_subm = pd.DataFrame(st.session_state.submissions)
+    df_subm = pd.DataFrame(subs) if subs else pd.DataFrame(columns=[
+        "user", "assignment", "answers", "total_score", "total_max", "points_awarded"
+    ])
+
+    df_rev = pd.DataFrame(revs) if revs else pd.DataFrame(columns=[
+        "submission_idx", "assignment", "reviewer", "scores", "avg_score", "comment"
+    ])
 
     st.write("—")
     st.markdown("**Выгрузка данных**")
-    buf1 = io.BytesIO()
-    buf2 = io.BytesIO()
+    buf1, buf2, buf3 = io.BytesIO(), io.BytesIO(), io.BytesIO()
     df_points.to_csv(buf1, index=False, encoding="utf-8-sig")
     df_subm.to_csv(buf2, index=False, encoding="utf-8-sig")
-
-    st.download_button("⬇️ Скачать лидерборд (CSV)", data=buf1.getvalue(),
-                    file_name="leaderboard.csv", mime="text/csv")
-    st.download_button("⬇️ Скачать сдачи (CSV)", data=buf2.getvalue(),
-                    file_name="submissions.csv", mime="text/csv")
+    df_rev.to_csv(buf3, index=False, encoding="utf-8-sig")
+    st.download_button("⬇️ Лидерборд (CSV)", data=buf1.getvalue(),
+                    file_name=f"leaderboard_{current_subject()}.csv", mime="text/csv")
+    st.download_button("⬇️ Сдачи (CSV)", data=buf2.getvalue(),
+                    file_name=f"submissions_{current_subject()}.csv", mime="text/csv")
+    st.download_button("⬇️ Отзывы (CSV)", data=buf3.getvalue(),
+                    file_name=f"reviews_{current_subject()}.csv", mime="text/csv")
 
 
 with tab_chat:
