@@ -20,6 +20,11 @@ POINTS_PATH = "points.json"
 SUBM_PATH   = "submissions.json"
 REVIEWS_PATH = "reviews.json"
 
+# --- Materials storage
+MATERIALS_DIR = "materials"
+MATERIALS_INDEX = "materials_index.json"  # subject -> [ {name, path, size, mime, uploader, note, ts} ]
+
+
 def current_subject() -> str:
     return st.session_state.get("subject", "General")
 
@@ -98,6 +103,26 @@ def migrate_stores_to_subject_scope():
     if isinstance(st.session_state.reviews, list):
         st.session_state.reviews = {"General": st.session_state.reviews}
         save_json(REVIEWS_PATH, st.session_state.reviews)
+
+def load_materials_index():
+    return load_json(MATERIALS_INDEX, {})
+
+def save_materials_index(idx):
+    save_json(MATERIALS_INDEX, idx)
+
+def ensure_dir(path: str):
+    os.makedirs(path, exist_ok=True)
+
+def get_materials_store():
+    idx = load_materials_index()
+    subj = current_subject()
+    if subj not in idx:
+        idx[subj] = []
+        save_materials_index(idx)
+    return idx, idx[subj]
+
+def safe_filename(name: str) -> str:
+    return re.sub(r"[^A-Za-z0-9._\-]+", "_", name)
 
 def get_points_store() -> dict:
     subj = current_subject()
@@ -288,8 +313,8 @@ st.sidebar.info("Pегистрация не требуется.")
 st.sidebar.divider()
 st.sidebar.markdown("**О проекте**\n\nМини-платформа для проверки ДЗ и кросс-оценки. Экспорт в CSV, бейджи за активность.")
 
-tab_submit, tab_leaderboard, tab_peer, tab_chat = st.tabs(
-    ["📝 Мои задания", "🏆 Лидерборд", "🤝 Кросс-проверка", "💬 Чат-ассистент (демо)"]
+tab_submit, tab_materials, tab_leaderboard, tab_peer, tab_chat = st.tabs(
+    ["📝 Мои задания", "📚 Материалы курса", "🏆 Лидерборд", "🤝 Кросс-проверка", "💬 Чат-ассистент (демо)"]
 )
 
 with tab_peer:
@@ -610,3 +635,103 @@ with tab_chat:
 
 st.caption("⚙️ Минимальный прототип: ключевые слова → оценка, очки → лидерборд, простой FAQ.")
 
+with tab_materials:
+    st.subheader(f"Материалы: {current_subject()}")
+
+    # Upload area (teacher uploads 1+ files)
+    st.caption("Загрузите один или несколько файлов. Они будут доступны в этом предмете.")
+    uploaded = st.file_uploader("Загрузить файлы", type=None, accept_multiple_files=True)
+    note = st.text_input("Короткое описание (опционально)", placeholder="Например: лекция 1, слайды")
+    col_u1, col_u2 = st.columns([1, 2])
+    do_save = col_u1.button("Загрузить")
+
+    idx, items = get_materials_store()
+    subj = current_subject()
+    subj_dir = os.path.join(MATERIALS_DIR, safe_filename(subj))
+    ensure_dir(subj_dir)
+
+    if do_save and uploaded:
+        import time
+        for f in uploaded:
+            raw = f.read()
+            fname = safe_filename(f.name)
+            path = os.path.join(subj_dir, fname)
+
+            # avoid accidental overwrite: add suffix if exists
+            base, ext = os.path.splitext(fname)
+            k = 1
+            while os.path.exists(path):
+                fname = f"{base}({k}){ext}"
+                path = os.path.join(subj_dir, fname)
+                k += 1
+
+            with open(path, "wb") as out:
+                out.write(raw)
+
+            item = {
+                "name": fname,
+                "path": path,
+                "size": len(raw),
+                "mime": f.type or "application/octet-stream",
+                "uploader": user,
+                "note": note.strip(),
+                "ts": int(time.time())
+            }
+            items.append(item)
+        save_materials_index(idx)
+        st.success(f"Загружено файлов: {len(uploaded)}")
+
+    st.markdown("### Список материалов")
+    if not items:
+        st.info("Пока нет материалов для этого предмета.")
+    else:
+        # optional: filter by text
+        q = st.text_input("Поиск по имени/описанию", placeholder="Например: лекция, дз2…")
+        filtered = []
+        if q:
+            ql = q.lower()
+            for it in items:
+                if ql in it["name"].lower() or (it.get("note") or "").lower().find(ql) >= 0:
+                    filtered.append(it)
+        else:
+            filtered = items
+
+        # Render list with download buttons
+        for it in sorted(filtered, key=lambda x: x.get("ts", 0), reverse=True):
+            with st.container(border=True):
+                st.markdown(f"**{it['name']}**  —  <span class='muted'>{round(it['size']/1024,1)} KB</span>", unsafe_allow_html=True)
+                if it.get("note"):
+                    st.markdown(f"<span class='badge'>Описание</span> {it['note']}", unsafe_allow_html=True)
+                st.markdown(f"<span class='muted'>Загрузил: {it.get('uploader','?')}</span>", unsafe_allow_html=True)
+
+                # Read file for download button
+                try:
+                    with open(it["path"], "rb") as fh:
+                        data_bytes = fh.read()
+                    st.download_button(
+                        "⬇️ Скачать",
+                        data=data_bytes,
+                        file_name=it["name"],
+                        mime=it.get("mime") or "application/octet-stream",
+                        key=f"dl_{subj}_{it['name']}"
+                    )
+                except FileNotFoundError:
+                    st.error("Файл не найден на диске — возможно, был удалён вручную.")
+
+        # (Optional) Admin actions: simple cleanup
+        with st.expander("Управление (удалить файл)"):
+            names = [it["name"] for it in items]
+            if names:
+                to_del = st.selectbox("Выберите файл для удаления", names, key="del_material")
+                if st.button("Удалить выбранный файл"):
+                    # remove both file and index entry
+                    sel = next((it for it in items if it["name"] == to_del), None)
+                    if sel:
+                        try:
+                            if os.path.exists(sel["path"]):
+                                os.remove(sel["path"])
+                        except Exception:
+                            pass
+                        items[:] = [it for it in items if it["name"] != to_del]
+                        save_materials_index(idx)
+                        st.success("Удалено.")
