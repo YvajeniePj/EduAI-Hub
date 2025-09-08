@@ -1,12 +1,18 @@
-import json, re, os
+import json, re, os, time
 import streamlit as st
+import streamlit.components.v1
 import io, pandas as pd
 from dotenv import load_dotenv
 from statistics import mean
+from datetime import datetime
 
 load_dotenv()
 
 from openai import OpenAI
+from auth import require_auth, get_current_username, get_current_role, logout_user
+from test_manager import (
+    generate_test_id, validate_test_data, convert_to_rubric_format
+)
 
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
 client = None
@@ -54,7 +60,7 @@ def assignment_selector(widget_key: str):
 def submission_preview(s: dict, max_len: int = 60) -> str:
     """Короткий текст для списка выбора в кросс-проверке.
     Поддерживает старые ('answer') и новые ('answers'=[...]) форматы."""
-    if "answer" in s:  # старый формат
+    if "answer" in s:  
         txt = s.get("answer") or ""
     elif "answers" in s and s["answers"]:
         # возьмём первый ответ, либо склеим первые строки
@@ -152,6 +158,13 @@ def save_reviews_store():
     save_json(REVIEWS_PATH, st.session_state.reviews)
 
 
+
+# Инициализация JWT токена
+if "jwt_token" not in st.session_state:
+    st.session_state["jwt_token"] = None
+
+# Проверка авторизации - если пользователь не авторизован, показываем страницу входа
+require_auth()
 
 st.set_page_config(page_title="EduAI Hub (Mini)", page_icon="🎓", layout="wide")
 st.markdown("""
@@ -288,34 +301,130 @@ def peer_avg_for_submission(subm_idx: int):
 # --- sidebar "login"
 st.sidebar.markdown("### ⚙️ Настройки")
 st.sidebar.header("Профиль")
-user = st.sidebar.text_input("Ваше имя (для лидерборда)", value="Student")
+
+# Получаем данные текущего пользователя
+current_username = get_current_username()
+current_role = get_current_role()
+role_display = "Студент" if current_role == "student" else "Преподаватель"
+
+st.sidebar.markdown(f"**👤 {current_username}**")
+if current_role == "student":
+    st.sidebar.markdown(f"**🎓 {role_display}**")
+else:
+    st.sidebar.markdown(f"**👨‍🏫 {role_display}**")
+
+
+if st.sidebar.button("🚪 Выйти", use_container_width=True):
+    logout_user()
+    st.rerun()
+
+st.sidebar.divider()
+
+
+user = current_username
 
 # --- subject picker
-SUBJECTS = sorted({ r.get("subject", "General") for r in RUBRICS })
+# Загружаем предметы из файла subjects.json
+def load_subjects():
+    try:
+        with open("subjects.json", "r", encoding="utf-8") as f:
+            subjects = json.load(f)
+        return subjects
+    except FileNotFoundError:
+        # Если файл не существует, создаем его с предметами из rubric.json
+        subjects = sorted({ r.get("subject", "General") for r in RUBRICS })
+        save_subjects(subjects)
+        return subjects
+
+def save_subjects(subjects):
+    try:
+        with open("subjects.json", "w", encoding="utf-8") as f:
+            json.dump(subjects, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        st.error(f"Ошибка сохранения предметов: {e}")
+
+SUBJECTS = load_subjects()
+
+# Функционал управления предметами (только для преподавателей)
+if current_role == "teacher":
+    st.sidebar.markdown("### 📚 Управление предметами")
+    
+    # Поле для ввода нового предмета
+    new_subject = st.sidebar.text_input("Новый предмет", placeholder="Введите название предмета", key="new_subject_input")
+    
+    
+    if st.sidebar.button("➕ Добавить предмет", use_container_width=True):
+        if new_subject and new_subject.strip():
+            new_subject = new_subject.strip()
+            if new_subject not in SUBJECTS:
+                SUBJECTS.append(new_subject)
+                SUBJECTS.sort()
+                save_subjects(SUBJECTS)
+                st.session_state.subject = new_subject
+                st.sidebar.success(f"✅ Предмет '{new_subject}' добавлен!")
+                st.rerun()
+            else:
+                st.sidebar.warning("⚠️ Предмет уже существует")
+        else:
+            st.sidebar.error("❌ Введите название предмета")
+    
+    if len(SUBJECTS) > 1:  
+        st.sidebar.markdown("**Удалить предмет:**")
+        
+        # Создаем список предметов для удаления (исключаем General)
+        subjects_to_delete = [s for s in SUBJECTS if s != "General"]
+        
+        if subjects_to_delete:
+            subject_to_delete = st.sidebar.selectbox(
+                "Выберите предмет для удаления",
+                subjects_to_delete,
+                key="subject_to_delete",
+                help="Предмет можно удалить только если в нем нет заданий"
+            )
+            
+            if st.sidebar.button("🗑️ Удалить предмет", use_container_width=True):
+                assignments_in_subject = [r for r in RUBRICS if r.get("subject") == subject_to_delete]
+                if not assignments_in_subject:
+                    SUBJECTS.remove(subject_to_delete)
+                    save_subjects(SUBJECTS)
+                    if st.session_state.get("subject") == subject_to_delete:
+                        st.session_state.subject = "General"
+                    st.sidebar.success(f"✅ Предмет '{subject_to_delete}' удален!")
+                    st.rerun()
+                else:
+                    st.sidebar.error(f"❌ Нельзя удалить предмет с заданиями ({len(assignments_in_subject)} заданий)")
+    
+    st.sidebar.markdown("---")
+
 subject = st.sidebar.selectbox("Предмет", SUBJECTS, key="subject")
 
-
 use_ai = st.sidebar.checkbox("Включить AI-оценку (опционально)", value=True)
-st.session_state["use_ai"] = bool(use_ai)  # <-- ВАЖНО: кладём флаг в session_state
+st.session_state["use_ai"] = bool(use_ai)  
 
 # Connection status
 if client is None:
     st.sidebar.error("AI отключен: нет DEEPSEEK_API_KEY в .env")
 else:
     try:
-        _ = client.models.list()  # ping совместимого API
+        _ = client.models.list()  
         st.sidebar.success("AI подключен (DeepSeek)")
     except Exception as e:
         st.sidebar.error(f"AI недоступен: {getattr(e, 'message', str(e))[:120]}")
-st.sidebar.info("Pегистрация не требуется.")
+st.sidebar.info("Добро пожаловать в EduAI Hub!")
 
 
 st.sidebar.divider()
 st.sidebar.markdown("**О проекте**\n\nМини-платформа для проверки ДЗ и кросс-оценки. Экспорт в CSV, бейджи за активность.")
 
-tab_submit, tab_materials, tab_leaderboard, tab_peer, tab_chat = st.tabs(
-    ["📝 Мои задания", "📚 Материалы курса", "🏆 Лидерборд", "🤝 Кросс-проверка", "💬 Чат-ассистент (демо)"]
-)
+
+if current_role == "teacher":
+    tab_submit, tab_materials, tab_leaderboard, tab_peer, tab_chat, tab_test_creator = st.tabs(
+        ["📝 Мои задания", "📚 Материалы курса", "🏆 Лидерборд", "🤝 Кросс-проверка", "💬 Чат-ассистент (демо)", "📝 Создание тестов"]
+    )
+else:
+    tab_submit, tab_materials, tab_leaderboard, tab_peer, tab_chat = st.tabs(
+        ["📝 Мои задания", "📚 Материалы курса", "🏆 Лидерборд", "🤝 Кросс-проверка", "💬 Чат-ассистент (демо)"]
+    )
 
 with tab_peer:
 
@@ -349,10 +458,8 @@ with tab_peer:
 
         st.write("Ответ студента")
         if "answer" in pick:
-            # старый формат
             st.write(pick["answer"])
         elif "answers" in pick and pick["answers"]:
-            # новый формат: покажем каждый вопрос отдельным блоком
             for ans in pick["answers"]:
                 qid = ans.get("question_id", "")
                 atxt = (ans.get("answer") or "").strip()
@@ -416,7 +523,6 @@ with tab_peer:
                 f"**Сдача #{idx}** — peer-оценок: {cnt}"
                 + (f", среднее: **{avg}/5**" if avg is not None else "")
             )
-            # последние комментарии по этой сдаче
             comments = [
                 r.get("comment") for r in reviews
                 if isinstance(r, dict)
@@ -439,74 +545,123 @@ with tab_submit:
     if not questions:
         st.info("Для этого задания ещё не настроены вопросы.")
     else:
-        # Render a text area for each question
-        answers = {}
-        for q in questions:
-            st.markdown(f"### {q['title']}  \n*Макс. баллов: {q['max_points']}*")
-            answers[q["question_id"]] = st.text_area(
-                f"Ваш ответ ({q['question_id']})",
-                key=f"ans_{RUBRIC['assignment_id']}_{q['question_id']}",
-                height=140
-            )
-            st.markdown("---")
+        test_type = RUBRIC.get("test_type")
+        if not test_type:
+            if any("options" in q for q in questions):
+                test_type = "multiple_choice"
+            else:
+                test_type = "keyword_based"
+        
+        if test_type == "multiple_choice":
+            # Render multiple choice questions
+            answers = {}
+            for q in questions:
+                st.markdown(f"### {q['title']}  \n*Макс. баллов: {q['max_points']}*")
+                
+                options = q.get("options", [])
+                if options:
+                    selected_option = st.radio(
+                        "Выберите правильный ответ:",
+                        options=options,
+                        key=f"ans_{RUBRIC['assignment_id']}_{q['question_id']}"
+                    )
+                    answers[q["question_id"]] = selected_option
+                else:
+                    st.warning("Нет вариантов ответов для этого вопроса")
+                    answers[q["question_id"]] = ""
+                
+                st.markdown("---")
+        else:
+            # Render text area for keyword-based questions (original logic)
+            answers = {}
+            for q in questions:
+                st.markdown(f"### {q['title']}  \n*Макс. баллов: {q['max_points']}*")
+                answers[q["question_id"]] = st.text_area(
+                    f"Ваш ответ ({q['question_id']})",
+                    key=f"ans_{RUBRIC['assignment_id']}_{q['question_id']}",
+                    height=140
+                )
+                st.markdown("---")
 
         if st.button("Проверить все"):
             total_score = 0
             total_max = sum(q["max_points"] for q in questions)
             per_q_results = []
 
-            # Run baseline keyword scoring per question
+            # Run scoring per question based on test type
             for q in questions:
                 ans_text = answers.get(q["question_id"], "")
-                q_score_kw, q_details = keyword_score_for(
-                    ans_text, q["keywords"], q["max_points"]
-                )
-                per_q_results.append({
-                    "question_id": q["question_id"],
-                    "title": q["title"],
-                    "answer": ans_text,
-                    "kw_score": q_score_kw,
-                    "details": q_details
-                })
-                total_score += q_score_kw
-
-            # Optional AI refinement (average each question’s score with AI)
-            use_ai = st.session_state.get("use_ai")  # if you stored it; else read from sidebar
-            if 'use_ai' not in st.session_state:
-                # if you defined the checkbox in the sidebar, you likely have a local variable 'use_ai'
-                # fallback: try to use that local, else leave None
-                try:
-                    use_ai_local = use_ai
-                except:
-                    use_ai_local = False
-            else:
-                use_ai_local = st.session_state['use_ai']
-
-            ai_total_delta = 0
-            if use_ai_local:
-                for item in per_q_results:
-                    if client is None:
-                        continue
-                    # Build a temporary one-question rubric for llm_grade
-                    one_q_rubric = {
-                        "title": f"{RUBRIC['title']} — {item['title']}",
-                        "keywords": [{"word": k["word"]} for k in next(q for q in questions if q["question_id"]==item["question_id"])["keywords"]]
-                    }
-                    with st.spinner(f"AI оценивает: {item['question_id']}"):
-                        llm_info = llm_grade(item["answer"], one_q_rubric)
-                    if llm_info:
-                        # Combine keyword score (scaled to 0–100 by question max) with AI score (0–100)
-                        # then rescale back to question max
-                        kw_pct = (item["kw_score"] / next(q for q in questions if q["question_id"]==item["question_id"])["max_points"]) * 100
-                        combined_pct = (kw_pct + llm_info["score"]) / 2
-                        combined_score = round(combined_pct / 100 * next(q for q in questions if q["question_id"]==item["question_id"])["max_points"])
-                        ai_total_delta += (combined_score - item["kw_score"])
-                        item["ai_score"] = int(round(llm_info["score"]))
-                        item["final_score"] = combined_score
-                        item["ai_feedback"] = llm_info.get("feedback", [])
+                
+                if test_type == "multiple_choice":
+                    correct_answer = q.get("correct_answer", "")
+                    if ans_text == correct_answer:
+                        q_score = q["max_points"]
+                        q_details = [f"✅ Правильный ответ: +{q['max_points']} баллов"]
                     else:
+                        q_score = 0
+                        q_details = [f"❌ Неправильный ответ: 0 баллов (правильный: {correct_answer})"]
+                    
+                    per_q_results.append({
+                        "question_id": q["question_id"],
+                        "title": q["title"],
+                        "answer": ans_text,
+                        "kw_score": q_score,
+                        "details": q_details
+                    })
+                    total_score += q_score
+                    
+                else:
+                    q_score_kw, q_details = keyword_score_for(
+                        ans_text, q["keywords"], q["max_points"]
+                    )
+                    per_q_results.append({
+                        "question_id": q["question_id"],
+                        "title": q["title"],
+                        "answer": ans_text,
+                        "kw_score": q_score_kw,
+                        "details": q_details
+                    })
+                    total_score += q_score_kw
+
+            # Optional AI refinement (only for keyword-based tests)
+            if test_type == "keyword_based":
+                use_ai = st.session_state.get("use_ai")
+                if 'use_ai' not in st.session_state:
+                    try:
+                        use_ai_local = use_ai
+                    except:
+                        use_ai_local = False
+                else:
+                    use_ai_local = st.session_state['use_ai']
+
+                ai_total_delta = 0
+                if use_ai_local:
+                    for item in per_q_results:
+                        if client is None:
+                            continue
+                        # Build a temporary one-question rubric for llm_grade
+                        one_q_rubric = {
+                            "title": f"{RUBRIC['title']} — {item['title']}",
+                            "keywords": [{"word": k["word"]} for k in next(q for q in questions if q["question_id"]==item["question_id"])["keywords"]]
+                        }
+                        with st.spinner(f"AI оценивает: {item['question_id']}"):
+                            llm_info = llm_grade(item["answer"], one_q_rubric)
+                        if llm_info:
+                            # Combine keyword score (scaled to 0–100 by question max) with AI score (0–100)
+                            # then rescale back to question max
+                            kw_pct = (item["kw_score"] / next(q for q in questions if q["question_id"]==item["question_id"])["max_points"]) * 100
+                            combined_pct = (kw_pct + llm_info["score"]) / 2
+                            combined_score = round(combined_pct / 100 * next(q for q in questions if q["question_id"]==item["question_id"])["max_points"])
+                            ai_total_delta += (combined_score - item["kw_score"])
+                            item["ai_score"] = int(round(llm_info["score"]))
+                            item["final_score"] = combined_score
+                            item["ai_feedback"] = llm_info.get("feedback", [])
+                        else:
+                            item["final_score"] = item["kw_score"]
+                    total_score += ai_total_delta  # adjust total if AI used
+                else:
+                    for item in per_q_results:
                         item["final_score"] = item["kw_score"]
-                total_score += ai_total_delta  # adjust total if AI used
             else:
                 for item in per_q_results:
                     item["final_score"] = item["kw_score"]
@@ -580,7 +735,6 @@ with tab_leaderboard:
                 preview = submission_preview(s, max_len=40)
                 st.markdown(f"- **{s['user']}** → {summary}  <span class='muted'>(+{s['points_awarded']} очк.)</span>  — {preview}", unsafe_allow_html=True)
 
-    # Экспорт по предмету
     pts = get_points_store()
     subs = get_submissions_store()
     revs = get_reviews_store()
@@ -637,101 +791,765 @@ st.caption("⚙️ Минимальный прототип: ключевые с�
 
 with tab_materials:
     st.subheader(f"Материалы: {current_subject()}")
-
-    # Upload area (teacher uploads 1+ files)
-    st.caption("Загрузите один или несколько файлов. Они будут доступны в этом предмете.")
-    uploaded = st.file_uploader("Загрузить файлы", type=None, accept_multiple_files=True)
-    note = st.text_input("Короткое описание (опционально)", placeholder="Например: лекция 1, слайды")
-    col_u1, col_u2 = st.columns([1, 2])
-    do_save = col_u1.button("Загрузить")
-
-    idx, items = get_materials_store()
-    subj = current_subject()
-    subj_dir = os.path.join(MATERIALS_DIR, safe_filename(subj))
-    ensure_dir(subj_dir)
-
-    if do_save and uploaded:
-        import time
-        for f in uploaded:
-            raw = f.read()
-            fname = safe_filename(f.name)
-            path = os.path.join(subj_dir, fname)
-
-            # avoid accidental overwrite: add suffix if exists
-            base, ext = os.path.splitext(fname)
-            k = 1
-            while os.path.exists(path):
-                fname = f"{base}({k}){ext}"
-                path = os.path.join(subj_dir, fname)
-                k += 1
-
-            with open(path, "wb") as out:
-                out.write(raw)
-
-            item = {
-                "name": fname,
-                "path": path,
-                "size": len(raw),
-                "mime": f.type or "application/octet-stream",
-                "uploader": user,
-                "note": note.strip(),
-                "ts": int(time.time())
-            }
-            items.append(item)
-        save_materials_index(idx)
-        st.success(f"Загружено файлов: {len(uploaded)}")
-
-    st.markdown("### Список материалов")
-    if not items:
-        st.info("Пока нет материалов для этого предмета.")
-    else:
-        # optional: filter by text
-        q = st.text_input("Поиск по имени/описанию", placeholder="Например: лекция, дз2…")
-        filtered = []
-        if q:
-            ql = q.lower()
-            for it in items:
-                if ql in it["name"].lower() or (it.get("note") or "").lower().find(ql) >= 0:
-                    filtered.append(it)
+    tab_documents, tab_videos = st.tabs(["📄 Печатные материалы", "🎥 Видео материалы"])
+    
+    with tab_documents:
+        st.markdown("### 📄 Печатные материалы")
+        
+        # Upload area 
+        if current_role == "teacher":
+            st.caption("Загрузите один или несколько файлов. Они будут доступны в этом предмете.")
+            uploaded = st.file_uploader("Загрузить файлы", type=None, accept_multiple_files=True)
+            note = st.text_input("Короткое описание (опционально)", placeholder="Например: лекция 1, слайды")
+            col_u1, col_u2 = st.columns([1, 2])
+            do_save = col_u1.button("Загрузить")
         else:
-            filtered = items
+            st.info("📚 Загрузка материалов доступна только преподавателям")
+            uploaded = None
+            note = ""
+            do_save = False
 
-        # Render list with download buttons
-        for it in sorted(filtered, key=lambda x: x.get("ts", 0), reverse=True):
-            with st.container(border=True):
-                st.markdown(f"**{it['name']}**  —  <span class='muted'>{round(it['size']/1024,1)} KB</span>", unsafe_allow_html=True)
-                if it.get("note"):
-                    st.markdown(f"<span class='badge'>Описание</span> {it['note']}", unsafe_allow_html=True)
-                st.markdown(f"<span class='muted'>Загрузил: {it.get('uploader','?')}</span>", unsafe_allow_html=True)
+        # Логика загрузки и отображения печатных материалов
+        idx, items = get_materials_store()
+        subj = current_subject()
+        subj_dir = os.path.join(MATERIALS_DIR, safe_filename(subj))
+        ensure_dir(subj_dir)
 
-                # Read file for download button
-                try:
-                    with open(it["path"], "rb") as fh:
-                        data_bytes = fh.read()
-                    st.download_button(
-                        "⬇️ Скачать",
-                        data=data_bytes,
-                        file_name=it["name"],
-                        mime=it.get("mime") or "application/octet-stream",
-                        key=f"dl_{subj}_{it['name']}"
+        if do_save and uploaded:
+            import time
+            for f in uploaded:
+                raw = f.read()
+                fname = safe_filename(f.name)
+                path = os.path.join(subj_dir, fname)
+
+                # avoid accidental overwrite: add suffix if exists
+                base, ext = os.path.splitext(fname)
+                k = 1
+                while os.path.exists(path):
+                    fname = f"{base}({k}){ext}"
+                    path = os.path.join(subj_dir, fname)
+                    k += 1
+
+                with open(path, "wb") as out:
+                    out.write(raw)
+
+                item = {
+                    "name": fname,
+                    "path": path,
+                    "size": len(raw),
+                    "mime": f.type or "application/octet-stream",
+                    "uploader": user,
+                    "note": note.strip(),
+                    "ts": int(time.time())
+                }
+                items.append(item)
+            save_materials_index(idx)
+            st.success(f"Загружено файлов: {len(uploaded)}")
+
+        st.markdown("### Список материалов")
+        if not items:
+            st.info("Пока нет материалов для этого предмета.")
+        else:
+            # optional: filter by text
+            q = st.text_input("Поиск по имени/описанию", placeholder="Например: лекция, дз2…")
+            filtered = []
+            if q:
+                ql = q.lower()
+                for it in items:
+                    if ql in it["name"].lower() or (it.get("note") or "").lower().find(ql) >= 0:
+                        filtered.append(it)
+            else:
+                filtered = items
+
+            # Render list with download buttons
+            for it in sorted(filtered, key=lambda x: x.get("ts", 0), reverse=True):
+                with st.container(border=True):
+                    st.markdown(f"**{it['name']}**  —  <span class='muted'>{round(it['size']/1024,1)} KB</span>", unsafe_allow_html=True)
+                    if it.get("note"):
+                        st.markdown(f"<span class='badge'>Описание</span> {it['note']}", unsafe_allow_html=True)
+                    st.markdown(f"<span class='muted'>Загрузил: {it.get('uploader','?')}</span>", unsafe_allow_html=True)
+
+                    # Read file for download button
+                    try:
+                        with open(it["path"], "rb") as fh:
+                            data_bytes = fh.read()
+                        st.download_button(
+                            "⬇️ Скачать",
+                            data=data_bytes,
+                            file_name=it["name"],
+                            mime=it.get("mime") or "application/octet-stream",
+                            key=f"dl_{subj}_{it['name']}"
+                        )
+                    except FileNotFoundError:
+                        st.error("Файл не найден на диске — возможно, был удалён вручную.")
+
+            # (Optional) Admin actions: simple cleanup (только для преподавателей)
+            if current_role == "teacher":
+                with st.expander("Управление (удалить файл)"):
+                    names = [it["name"] for it in items]
+                    if names:
+                        to_del = st.selectbox("Выберите файл для удаления", names, key="del_material")
+                        if st.button("Удалить выбранный файл"):
+                            # remove both file and index entry
+                            sel = next((it for it in items if it["name"] == to_del), None)
+                            if sel:
+                                try:
+                                    if os.path.exists(sel["path"]):
+                                        os.remove(sel["path"])
+                                except Exception:
+                                    pass
+                            items[:] = [it for it in items if it["name"] != to_del]
+                            save_materials_index(idx)
+                            st.success("Удалено.")
+    
+    with tab_videos:
+        st.markdown("### 🎥 Видео материалы")
+        
+        # Функции для работы с видео
+        def get_video_info(url):
+            """Получает информацию о видео по ссылке"""
+            try:
+                if "youtube.com" in url or "youtu.be" in url:
+                    # Извлекаем ID видео из YouTube ссылки
+                    import re
+                    video_id = None
+                    if "youtube.com/watch?v=" in url:
+                        video_id = url.split("v=")[1].split("&")[0]
+                    elif "youtu.be/" in url:
+                        video_id = url.split("youtu.be/")[1].split("?")[0]
+                    
+                    if video_id:
+                        # Получаем название видео с YouTube
+                        video_title = get_youtube_title(video_id)
+                        
+                        return {
+                            "type": "youtube",
+                            "video_id": video_id,
+                            "embed_url": f"https://www.youtube.com/embed/{video_id}",
+                            "title": video_title
+                        }
+                elif "vk.com" in url:
+                    return {
+                        "type": "vk",
+                        "url": url,
+                        "title": "VK видео"
+                    }
+                else:
+                    return {
+                        "type": "other",
+                        "url": url,
+                        "title": "Видео"
+                    }
+            except Exception as e:
+                st.error(f"Ошибка обработки ссылки: {e}")
+                return None
+        
+        def get_youtube_title(video_id):
+            """Получает название YouTube видео по ID"""
+            try:
+                import requests
+                from bs4 import BeautifulSoup
+                
+                # Создаем URL для получения страницы видео
+                video_url = f"https://www.youtube.com/watch?v={video_id}"
+                
+                # Заголовки для имитации браузера
+                headers = {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+                }
+                
+                # Получаем страницу
+                response = requests.get(video_url, headers=headers, timeout=10)
+                response.raise_for_status()
+                
+                # Парсим HTML
+                soup = BeautifulSoup(response.text, 'html.parser')
+                
+                # Ищем title в head
+                title_tag = soup.find('title')
+                if title_tag:
+                    title = title_tag.get_text().strip()
+                    # Убираем " - YouTube" из названия
+                    if title.endswith(' - YouTube'):
+                        title = title[:-10].strip()
+                    return title
+                
+                # Если не нашли в title, ищем в meta тегах
+                meta_title = soup.find('meta', property='og:title')
+                if meta_title:
+                    return meta_title.get('content', '').strip()
+                
+                # Если ничего не нашли, возвращаем ID
+                return f"YouTube видео {video_id}"
+                
+            except Exception as e:
+                # Если не удалось получить название, возвращаем ID
+                return f"YouTube видео {video_id}"
+        
+        def load_videos():
+            """Загружает список видео из файла"""
+            try:
+                with open("videos.json", "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except FileNotFoundError:
+                return {}
+        
+        def save_videos(videos):
+            """Сохраняет список видео в файл"""
+            with open("videos.json", "w", encoding="utf-8") as f:
+                json.dump(videos, f, ensure_ascii=False, indent=2)
+        
+        # Загружаем видео для текущего предмета
+        videos_data = load_videos()
+        current_subject_videos = videos_data.get(current_subject(), [])
+        
+        # Форма добавления видео (только для преподавателей)
+        if current_role == "teacher":
+            st.markdown("#### Добавить видео")
+            video_url = st.text_input("Ссылка на видео", placeholder="https://www.youtube.com/watch?v=...", key="video_url")
+            video_note = st.text_input("Описание видео (опционально)", placeholder="Например: Лекция 1, Основы ML", key="video_note")
+            
+            if st.button("🎥 Добавить видео", use_container_width=True):
+                if video_url and video_url.strip():
+                    video_info = get_video_info(video_url.strip())
+                    if video_info:
+                        video_item = {
+                            "url": video_url.strip(),
+                            "title": video_info["title"],
+                            "note": video_note.strip(),
+                            "uploader": user,
+                            "ts": int(time.time()),
+                            "video_info": video_info
+                        }
+                        
+                        current_subject_videos.append(video_item)
+                        videos_data[current_subject()] = current_subject_videos
+                        save_videos(videos_data)
+                        
+                        st.success(f"✅ Видео '{video_info['title']}' добавлено!")
+                        st.rerun()
+                    else:
+                        st.error("❌ Не удалось обработать ссылку на видео")
+                else:
+                    st.error("❌ Введите ссылку на видео")
+        else:
+            st.info("🎥 Добавление видео доступно только преподавателям")
+        
+        # Отображение списка видео
+        st.markdown("#### Список видео")
+        if not current_subject_videos:
+            st.info("Пока нет видео для этого предмета.")
+        else:
+            # Поиск по видео
+            search_query = st.text_input("Поиск по названию/описанию", placeholder="Например: лекция, ML...", key="video_search")
+            
+            filtered_videos = current_subject_videos
+            if search_query:
+                search_lower = search_query.lower()
+                filtered_videos = [v for v in current_subject_videos 
+                                 if search_lower in v.get("title", "").lower() or 
+                                    search_lower in v.get("note", "").lower()]
+            
+            # Отображаем видео
+            for i, video in enumerate(sorted(filtered_videos, key=lambda x: x.get("ts", 0), reverse=True)):
+                with st.container(border=True):
+                    st.markdown(f"**{video['title']}**")
+                    if video.get("note"):
+                        st.markdown(f"<span class='badge'>Описание</span> {video['note']}", unsafe_allow_html=True)
+                    st.markdown(f"<span class='muted'>Добавил: {video.get('uploader', '?')}</span>", unsafe_allow_html=True)
+                    
+                    # Встраиваем плеер
+                    video_info = video.get("video_info", {})
+                    if video_info.get("type") == "youtube":
+                        st.components.v1.iframe(video_info["embed_url"], width=700, height=400)
+                    else:
+                        st.markdown(f"[Открыть видео]({video['url']})")
+                    
+                    # Кнопка удаления (только для преподавателей)
+                    if current_role == "teacher":
+                        if st.button(f"🗑️ Удалить", key=f"del_video_{i}"):
+                            current_subject_videos.remove(video)
+                            videos_data[current_subject()] = current_subject_videos
+                            save_videos(videos_data)
+                            st.success("Видео удалено")
+                            st.rerun()
+
+# Вкладка создания тестов (только для преподавателей)
+if current_role == "teacher":
+    with tab_test_creator:
+        st.subheader("📝 Создание тестов")
+        st.markdown("Создавайте тесты двух типов: с вариантами ответов или с оценкой по ключевым словам.")
+        
+        # Переключатель между созданием и управлением тестами
+        tab_create, tab_manage = st.tabs(["Создать тест", "Управление тестами"])
+        
+        with tab_create:
+            st.markdown("### Создание нового теста")
+            
+            # Основная форма для создания теста 
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                test_title = st.text_input("Название теста", placeholder="Например: Контрольная работа №1", key="test_title_input")
+                test_subject = st.selectbox("Предмет", SUBJECTS, key="test_subject")
+            
+            with col2:
+                test_type = st.selectbox(
+                    "Тип теста",
+                    ["multiple_choice", "keyword_based"],
+                    format_func=lambda x: "С вариантами ответов" if x == "multiple_choice" else "С ключевыми словами",
+                    key="test_type_selector"
+                )
+                test_description = st.text_area("Описание теста (опционально)", height=100, key="test_description_input")
+                
+                # Сохраняем тип теста в session_state
+                st.session_state.test_type = test_type
+                
+                # Автоматически обновляем форму при смене типа теста
+                if "previous_test_type" not in st.session_state:
+                    st.session_state.previous_test_type = test_type
+                elif st.session_state.previous_test_type != test_type:
+                    st.session_state.previous_test_type = test_type
+                    st.session_state.questions = [{"question_id": "q1"}]
+                    st.rerun()
+            
+            # Кнопка создания теста
+            if st.button("🎯 Создать тест", use_container_width=True):
+                # Собираем данные теста
+                test_data = {
+                    "title": test_title,
+                    "subject": test_subject,
+                    "test_type": test_type,
+                    "description": test_description,
+                    "questions": st.session_state.get("questions", [])
+                }
+                
+                # Генерируем ID теста
+                test_id = generate_test_id(test_title, test_subject)
+                test_data["test_id"] = test_id
+                
+                # Валидируем данные
+                is_valid, error_message = validate_test_data(test_data)
+                
+                if is_valid:
+                    # Добавляем тест в rubric.json
+                    rubric_data = convert_to_rubric_format(test_data)
+                    
+                    # Загружаем существующие рубрики
+                    with open("rubric.json", "r", encoding="utf-8") as f:
+                        rubrics = json.load(f)
+                    
+                    # Добавляем новую рубрику
+                    rubrics.append(rubric_data)
+                    
+                    # Сохраняем
+                    with open("rubric.json", "w", encoding="utf-8") as f:
+                        json.dump(rubrics, f, ensure_ascii=False, indent=2)
+                    
+                    st.success(f"✅ Тест '{test_title}' успешно создан и добавлен в задания!")
+                    st.info(f"ID теста: {test_id}")
+                    
+                    # Очищаем форму
+                    st.session_state.questions = [{"question_id": "q1"}]
+                    st.rerun()
+                else:
+                    st.error(f"❌ Ошибка валидации: {error_message}")
+            
+            st.markdown("---")
+            st.markdown("### Вопросы")
+            
+            # Динамическое добавление вопросов
+            if "questions" not in st.session_state:
+                st.session_state.questions = [{"question_id": "q1"}]
+            
+            # Кнопки управления вопросами (вне формы)
+            col_add, col_clear = st.columns([1, 1])
+            with col_add:
+                if st.button("➕ Добавить вопрос", use_container_width=True):
+                    new_q_id = f"q{len(st.session_state.questions) + 1}"
+                    st.session_state.questions.append({"question_id": new_q_id})
+                    st.rerun()
+            
+            with col_clear:
+                if st.button("🗑️ Очистить все", use_container_width=True):
+                    st.session_state.questions = [{"question_id": "q1"}]
+                    st.rerun()
+                
+            # Инициализируем тип теста если его нет
+            if "test_type" not in st.session_state:
+                st.session_state.test_type = "multiple_choice"
+
+            # Отображение вопросов
+            for i, question in enumerate(st.session_state.questions):
+                with st.expander(f"Вопрос {i+1} (ID: {question['question_id']})", expanded=True):
+                    question_text = st.text_area(
+                        f"Текст вопроса {i+1}",
+                        value=question.get("question_text", ""),
+                        key=f"q_text_{i}",
+                        height=100
                     )
-                except FileNotFoundError:
-                    st.error("Файл не найден на диске — возможно, был удалён вручную.")
-
-        # (Optional) Admin actions: simple cleanup
-        with st.expander("Управление (удалить файл)"):
-            names = [it["name"] for it in items]
-            if names:
-                to_del = st.selectbox("Выберите файл для удаления", names, key="del_material")
-                if st.button("Удалить выбранный файл"):
-                    # remove both file and index entry
-                    sel = next((it for it in items if it["name"] == to_del), None)
-                    if sel:
-                        try:
-                            if os.path.exists(sel["path"]):
-                                os.remove(sel["path"])
-                        except Exception:
-                            pass
-                        items[:] = [it for it in items if it["name"] != to_del]
-                        save_materials_index(idx)
-                        st.success("Удалено.")
+                    
+                    # Получаем тип теста из session_state
+                    test_type = st.session_state.get("test_type", "multiple_choice")
+                    
+                    if test_type == "multiple_choice":
+                        st.markdown("**Варианты ответов:**")
+                        
+                        # Инициализируем options если их нет
+                        if "options" not in st.session_state.questions[i]:
+                            st.session_state.questions[i]["options"] = ["", ""]
+                        
+                        options = st.session_state.questions[i].get("options", ["", ""])
+                        
+                        # Отображаем существующие варианты
+                        for j, option in enumerate(options):
+                            option_text = st.text_input(
+                                f"Вариант {j+1}",
+                                value=option,
+                                key=f"q_{i}_option_{j}"
+                            )
+                            # Обновляем вариант в session_state
+                            st.session_state.questions[i]["options"][j] = option_text
+                        
+                        # Кнопки для добавления/удаления вариантов (вне формы)
+                        col_buttons = st.columns([1, 1, 4])  # Две кнопки рядом, остальное место пустое
+                        with col_buttons[0]:
+                            if st.button("➕ Вариант", key=f"add_opt_{i}"):
+                                st.session_state.questions[i]["options"].append("")
+                                st.rerun()
+                        with col_buttons[1]:
+                            if st.button("➖ Вариант", key=f"rem_opt_{i}"):
+                                if len(st.session_state.questions[i]["options"]) > 1:
+                                    st.session_state.questions[i]["options"].pop()
+                                    st.rerun()
+                        
+                        # Фильтруем пустые варианты для selectbox
+                        valid_options = [opt for opt in st.session_state.questions[i]["options"] if opt.strip()]
+                        
+                        correct_answer = st.selectbox(
+                            "Правильный ответ",
+                            options=valid_options if valid_options else ["Нет вариантов"],
+                            key=f"q_{i}_correct"
+                        )
+                        
+                        max_points = st.number_input(
+                            "Максимальные баллы",
+                            min_value=1,
+                            max_value=100,
+                            value=question.get("max_points", 10),
+                            key=f"q_{i}_points"
+                        )
+                        
+                        # Обновляем данные вопроса
+                        st.session_state.questions[i].update({
+                            "question_text": question_text,
+                            "correct_answer": correct_answer,
+                            "max_points": max_points
+                        })
+                    
+                    elif test_type == "keyword_based":
+                        st.markdown("**Ключевые слова и баллы:**")
+                        
+                        # Инициализируем keywords если их нет
+                        if "keywords" not in st.session_state.questions[i]:
+                            st.session_state.questions[i]["keywords"] = [{"word": "", "points": 1}]
+                        
+                        keywords = st.session_state.questions[i].get("keywords", [{"word": "", "points": 1}])
+                        
+                        # Отображаем существующие ключевые слова
+                        for j, keyword in enumerate(keywords):
+                            col_word, col_points = st.columns([3, 1])
+                            with col_word:
+                                word = st.text_input(
+                                    f"Ключевое слово {j+1}",
+                                    value=keyword.get("word", ""),
+                                    key=f"q_{i}_kw_{j}_word"
+                                )
+                            with col_points:
+                                points = st.number_input(
+                                    "Баллы",
+                                    min_value=1,
+                                    max_value=100,
+                                    value=keyword.get("points", 1),
+                                    key=f"q_{i}_kw_{j}_points"
+                                )
+                            
+                            # Обновляем ключевое слово в session_state
+                            st.session_state.questions[i]["keywords"][j] = {"word": word, "points": points}
+                        
+                        # Кнопки для добавления/удаления ключевых слов (вне формы)
+                        col_buttons = st.columns([1, 1, 4])  # Две кнопки рядом, остальное место пустое
+                        with col_buttons[0]:
+                            if st.button("➕ Ключевое слово", key=f"add_kw_{i}"):
+                                st.session_state.questions[i]["keywords"].append({"word": "", "points": 1})
+                                st.rerun()
+                        with col_buttons[1]:
+                            if st.button("➖ Ключевое слово", key=f"rem_kw_{i}"):
+                                if len(st.session_state.questions[i]["keywords"]) > 0:
+                                    st.session_state.questions[i]["keywords"].pop()
+                                    st.rerun()
+                        
+                        max_points = st.number_input(
+                            "Максимальные баллы за вопрос",
+                            min_value=1,
+                            max_value=100,
+                            value=question.get("max_points", 10),
+                            key=f"q_{i}_max_points"
+                        )
+                        
+                        # Обновляем данные вопроса
+                        st.session_state.questions[i].update({
+                            "question_text": question_text,
+                            "max_points": max_points
+                        })
+        
+        with tab_manage:
+            st.markdown("### Управление тестами")
+            
+            # Фильтр по предмету
+            filter_subject = st.selectbox("Фильтр по предмету", ["Все"] + SUBJECTS, key="test_filter")
+            
+            # Получаем тесты из rubric.json (где они реально используются)
+            with open("rubric.json", "r", encoding="utf-8") as f:
+                all_rubrics = json.load(f)
+            
+            # Фильтруем тесты по предмету (показываем все тесты)
+            if filter_subject == "Все":
+                filtered_rubrics = all_rubrics
+            else:
+                filtered_rubrics = [r for r in all_rubrics if r.get("subject") == filter_subject]
+            
+            if not filtered_rubrics:
+                st.info("Пока нет созданных тестов")
+            else:
+                # Отображение списка тестов
+                for rubric in filtered_rubrics:
+                    test_id = rubric["assignment_id"]
+                    with st.container(border=True):
+                        col_title, col_actions = st.columns([3, 1])
+                        
+                        with col_title:
+                            st.markdown(f"**{rubric['title']}**")
+                            
+                            # Определяем тип теста
+                            if rubric.get("test_type") == "multiple_choice":
+                                test_type_display = "С вариантами ответов"
+                            elif rubric.get("test_type") == "keyword_based":
+                                test_type_display = "С ключевыми словами"
+                            else:
+                                # Старые тесты без test_type - определяем по структуре
+                                if any("options" in q for q in rubric.get("questions", [])):
+                                    test_type_display = "С вариантами ответов (старый формат)"
+                                else:
+                                    test_type_display = "С ключевыми словами (старый формат)"
+                            
+                            st.markdown(f"*Предмет: {rubric['subject']} | Тип: {test_type_display}*")
+                            st.markdown(f"*Вопросов: {len(rubric['questions'])} | ID: {test_id}*")
+                        
+                        with col_actions:
+                            if st.button("🗑️", key=f"del_{test_id}", help="Удалить тест"):
+                                # Удаляем из rubric.json
+                                updated_rubrics = [r for r in all_rubrics if r["assignment_id"] != test_id]
+                                
+                                with open("rubric.json", "w", encoding="utf-8") as f:
+                                    json.dump(updated_rubrics, f, ensure_ascii=False, indent=2)
+                                
+                                st.success("Тест удален")
+                                st.rerun()
+                            
+                            if st.button("📋", key=f"edit_{test_id}", help="Просмотр и редактирование теста"):
+                                # Переключаемся на режим редактирования
+                                st.session_state[f"edit_test_{test_id}"] = True
+                                st.rerun()
+            
+            # Проверяем, есть ли тест для редактирования
+            editing_test = None
+            for rubric in filtered_rubrics:
+                test_id = rubric["assignment_id"]
+                if st.session_state.get(f"edit_test_{test_id}", False):
+                    editing_test = rubric
+                    break
+            
+            # Отображение режима редактирования
+            if editing_test:
+                st.markdown("---")
+                st.markdown(f"### ✏️ Редактирование теста: {editing_test['title']}")
+                
+                # Кнопка возврата
+                if st.button("← Назад к списку", key="back_to_list"):
+                    # Очищаем все флаги редактирования
+                    for key in list(st.session_state.keys()):
+                        if key.startswith("edit_test_"):
+                            del st.session_state[key]
+                    st.rerun()
+                
+                # Определяем тип теста
+                test_type = editing_test.get("test_type")
+                if not test_type:
+                    if any("options" in q for q in editing_test.get("questions", [])):
+                        test_type = "multiple_choice"
+                    else:
+                        test_type = "keyword_based"
+                
+                # Форма редактирования
+                with st.form("edit_test_form"):
+                    col1, col2 = st.columns(2)
+                    
+                    with col1:
+                        new_title = st.text_input("Название теста", value=editing_test["title"])
+                        new_subject = st.selectbox("Предмет", SUBJECTS, index=SUBJECTS.index(editing_test["subject"]) if editing_test["subject"] in SUBJECTS else 0)
+                    
+                    with col2:
+                        new_test_type = st.selectbox(
+                            "Тип теста",
+                            ["multiple_choice", "keyword_based"],
+                            index=0 if test_type == "multiple_choice" else 1,
+                            format_func=lambda x: "С вариантами ответов" if x == "multiple_choice" else "С ключевыми словами"
+                        )
+                        new_description = st.text_area("Описание теста", value=editing_test.get("description", ""), height=100)
+                    
+                    st.markdown("---")
+                    st.markdown("### Вопросы")
+                    
+                    # Отображение вопросов для редактирования
+                    questions = editing_test.get("questions", [])
+                    for i, question in enumerate(questions):
+                        with st.expander(f"Вопрос {i+1} (ID: {question.get('question_id', f'q{i+1}')})", expanded=True):
+                            question_text = st.text_area(
+                                f"Текст вопроса {i+1}",
+                                value=question.get("title", ""),
+                                key=f"edit_q_text_{i}",
+                                height=100
+                            )
+                            
+                            if new_test_type == "multiple_choice":
+                                st.markdown("**Варианты ответов:**")
+                                options = question.get("options", [])
+                                
+                                for j, option in enumerate(options):
+                                    option_text = st.text_input(
+                                        f"Вариант {j+1}",
+                                        value=option,
+                                        key=f"edit_q_{i}_option_{j}"
+                                    )
+                                
+                                correct_answer = st.selectbox(
+                                    "Правильный ответ",
+                                    options=options if options else ["Нет вариантов"],
+                                    index=options.index(question.get("correct_answer", "")) if question.get("correct_answer", "") in options else 0,
+                                    key=f"edit_q_{i}_correct"
+                                )
+                                
+                                max_points = st.number_input(
+                                    "Максимальные баллы",
+                                    min_value=1,
+                                    max_value=100,
+                                    value=question.get("max_points", 10),
+                                    key=f"edit_q_{i}_points"
+                                )
+                                
+                            else:  # keyword_based
+                                st.markdown("**Ключевые слова и баллы:**")
+                                keywords = question.get("keywords", [])
+                                
+                                for j, keyword in enumerate(keywords):
+                                    col_word, col_points = st.columns([3, 1])
+                                    with col_word:
+                                        word = st.text_input(
+                                            f"Ключевое слово {j+1}",
+                                            value=keyword.get("word", ""),
+                                            key=f"edit_q_{i}_kw_{j}_word"
+                                        )
+                                    with col_points:
+                                        points = st.number_input(
+                                            "Баллы",
+                                            min_value=1,
+                                            max_value=100,
+                                            value=keyword.get("points", 1),
+                                            key=f"edit_q_{i}_kw_{j}_points"
+                                        )
+                                
+                                max_points = st.number_input(
+                                    "Максимальные баллы за вопрос",
+                                    min_value=1,
+                                    max_value=100,
+                                    value=question.get("max_points", 10),
+                                    key=f"edit_q_{i}_max_points"
+                                )
+                    
+                    # Кнопки сохранения
+                    col_save, col_cancel = st.columns([1, 1])
+                    with col_save:
+                        if st.form_submit_button("💾 Сохранить изменения", use_container_width=True):
+                            # Собираем обновленные данные теста
+                            updated_test = {
+                                "subject": new_subject,
+                                "assignment_id": editing_test["assignment_id"],
+                                "title": new_title,
+                                "test_type": new_test_type,
+                                "description": new_description,
+                                "questions": []
+                            }
+                            
+                            # Обновляем вопросы
+                            for i, question in enumerate(questions):
+                                updated_question = {
+                                    "question_id": question.get("question_id", f"q{i+1}"),
+                                    "title": st.session_state.get(f"edit_q_text_{i}", question.get("title", "")),
+                                    "max_points": question.get("max_points", 10)
+                                }
+                                
+                                if new_test_type == "multiple_choice":
+                                    # Обновляем варианты ответов
+                                    options = []
+                                    for j in range(len(question.get("options", []))):
+                                        option_value = st.session_state.get(f"edit_q_{i}_option_{j}", "")
+                                        if option_value:
+                                            options.append(option_value)
+                                    
+                                    updated_question.update({
+                                        "options": options,
+                                        "correct_answer": st.session_state.get(f"edit_q_{i}_correct", ""),
+                                        "max_points": st.session_state.get(f"edit_q_{i}_points", question.get("max_points", 10)),
+                                        "test_type": "multiple_choice"
+                                    })
+                                else:
+                                    # Обновляем ключевые слова
+                                    keywords = []
+                                    for j in range(len(question.get("keywords", []))):
+                                        word = st.session_state.get(f"edit_q_{i}_kw_{j}_word", "")
+                                        points = st.session_state.get(f"edit_q_{i}_kw_{j}_points", 1)
+                                        if word:
+                                            keywords.append({"word": word, "points": points})
+                                    
+                                    updated_question.update({
+                                        "keywords": keywords,
+                                        "max_points": st.session_state.get(f"edit_q_{i}_max_points", question.get("max_points", 10))
+                                    })
+                                
+                                updated_test["questions"].append(updated_question)
+                            
+                            # Сохраняем изменения в rubric.json
+                            with open("rubric.json", "r", encoding="utf-8") as f:
+                                all_rubrics = json.load(f)
+                            
+                            # Находим и обновляем тест
+                            for i, rubric in enumerate(all_rubrics):
+                                if rubric["assignment_id"] == editing_test["assignment_id"]:
+                                    all_rubrics[i] = updated_test
+                                    break
+                            
+                            # Сохраняем обновленный файл
+                            with open("rubric.json", "w", encoding="utf-8") as f:
+                                json.dump(all_rubrics, f, ensure_ascii=False, indent=2)
+                            
+                            st.success("✅ Изменения сохранены!")
+                            # Очищаем флаг редактирования
+                            del st.session_state[f"edit_test_{editing_test['assignment_id']}"]
+                            st.rerun()
+                    
+                    with col_cancel:
+                        if st.form_submit_button("❌ Отмена", use_container_width=True):
+                            # Очищаем флаг редактирования
+                            del st.session_state[f"edit_test_{editing_test['assignment_id']}"]
+                            st.rerun()
