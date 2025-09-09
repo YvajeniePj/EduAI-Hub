@@ -54,6 +54,11 @@ def convert_to_rubric_format(test_data: Dict) -> Dict:
         "test_type": test_data["test_type"],  # Добавляем тип теста
         "questions": []
     }
+    # Опциональный срок сдачи
+    if test_data.get("due_date"):
+        rubric["due_date"] = test_data["due_date"]
+    if test_data.get("time_limit_minutes"):
+        rubric["time_limit_minutes"] = int(test_data["time_limit_minutes"])
     
     for question in test_data["questions"]:
         if test_data["test_type"] == "keyword_based":

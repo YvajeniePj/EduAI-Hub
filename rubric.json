@@ -337,5 +337,47 @@
         ]
       }
     ]
+  },
+  {
+    "subject": "Основы ML и Практика Python",
+    "assignment_id": "_______ml____________python_32_426881",
+    "title": "32",
+    "test_type": "multiple_choice",
+    "questions": [
+      {
+        "question_id": "q1",
+        "title": "41",
+        "max_points": 10,
+        "options": [
+          "1",
+          "1"
+        ],
+        "correct_answer": "1",
+        "test_type": "multiple_choice"
+      }
+    ],
+    "due_date": "2025-09-09",
+    "time_limit_minutes": 5
+  },
+  {
+    "subject": "Основы ML и Практика Python",
+    "assignment_id": "_______ml____________python_1134_427556",
+    "title": "1134",
+    "test_type": "multiple_choice",
+    "questions": [
+      {
+        "question_id": "q1",
+        "title": "2",
+        "max_points": 10,
+        "options": [
+          "3",
+          "4"
+        ],
+        "correct_answer": "3",
+        "test_type": "multiple_choice"
+      }
+    ],
+    "due_date": "2025-09-09",
+    "time_limit_minutes": 1
   }
 ]

@@ -38,8 +38,8 @@ def assignment_selector(widget_key: str):
     subj = current_subject()
     sub_rubrics = [r for r in RUBRICS if r.get("subject", "General") == subj]
     if not sub_rubrics:
-        st.warning("Для этого предмета пока нет заданий.")
-        st.stop()
+        st.info("Для этого предмета пока нет заданий.")
+        return None
     id_to_r = {r["assignment_id"]: r for r in sub_rubrics}
     ids = list(id_to_r.keys())
 
@@ -47,11 +47,25 @@ def assignment_selector(widget_key: str):
     if cur not in ids:
         cur = ids[0]
 
+    def format_assignment(rid: str) -> str:
+        r = id_to_r[rid]
+        title = r.get("title", rid)
+        due = r.get("due_date")
+        if due:
+            try:
+                # Показать как ДД.ММ.ГГГГ
+                from datetime import datetime
+                d = datetime.fromisoformat(due)
+                return f"{title} (до {d.strftime('%d.%m.%Y')})"
+            except Exception:
+                return f"{title} (до {due})"
+        return title
+
     rid = st.selectbox(
         "Задание:",
         options=ids,
         index=ids.index(cur),
-        format_func=lambda rid: id_to_r[rid]["title"],
+        format_func=format_assignment,
         key=widget_key,
     )
     st.session_state["assign_id"] = rid
@@ -431,84 +445,87 @@ with tab_peer:
     st.subheader("Кросс-проверка (анонимно)")
     st.subheader("Выбор задания")
     RUBRIC = assignment_selector("assign_id_peer")
-    st.subheader("Ответы на вопросы задания")
-
-    # Pick which assignment to review (reuse current selection)
-    st.caption("Выберите задание для проверки (совпадает с селектором выше).")
-    # We already have assign_id and RUBRIC bound from the selector section.
-
-    # Build candidate submissions
-    subs = get_submissions_store()
-    all_subms = [
-        (idx, s) for idx, s in enumerate(subs)
-        if s.get("assignment") == RUBRIC["assignment_id"] and s.get("user") != user
-    ]
-
-    if not all_subms:
-        st.info("Пока нет чужих ответов по этому заданию.")
+    if RUBRIC is None:
+        st.info("Добавьте задание в этом предмете во вкладке 'Создание тестов'.")
     else:
-        # Show a simple picker
-        option_indices = [idx for idx, _ in all_subms]
-        labels = [f"#{idx} — {s.get('user','?')}: {submission_preview(s)}" for idx, s in all_subms]
-        sel = st.selectbox("Выберите ответ для проверки:", options=range(len(option_indices)),
-                        format_func=lambda i: labels[i])
-        pick_idx = option_indices[sel]
-        pick = subs[pick_idx]
+        st.subheader("Ответы на вопросы задания")
 
+        # Pick which assignment to review (reuse current selection)
+        st.caption("Выберите задание для проверки (совпадает с селектором выше).")
+        # We already have assign_id and RUBRIC bound from the selector section.
 
-        st.write("Ответ студента")
-        if "answer" in pick:
-            st.write(pick["answer"])
-        elif "answers" in pick and pick["answers"]:
-            for ans in pick["answers"]:
-                qid = ans.get("question_id", "")
-                atxt = (ans.get("answer") or "").strip()
-                st.markdown(f"**{qid}**")
-                st.write(atxt if atxt else "—")
-                st.markdown("<hr style='border:none;border-top:1px solid #eee;margin:8px 0;' />", unsafe_allow_html=True)
+        # Build candidate submissions
+        subs = get_submissions_store()
+        all_subms = [
+            (idx, s) for idx, s in enumerate(subs)
+            if s.get("assignment") == RUBRIC["assignment_id"] and s.get("user") != user
+        ]
+
+        if not all_subms:
+            st.info("Пока нет чужих ответов по этому заданию.")
         else:
-            st.write("Ответ отсутствует.")
+            # Show a simple picker
+            option_indices = [idx for idx, _ in all_subms]
+            labels = [f"#{idx} — {s.get('user','?')}: {submission_preview(s)}" for idx, s in all_subms]
+            sel = st.selectbox("Выберите ответ для проверки:", options=range(len(option_indices)),
+                            format_func=lambda i: labels[i])
+            pick_idx = option_indices[sel]
+            pick = subs[pick_idx]
 
 
-        st.markdown("### Оцените по критериям (1–5)")
-        c1, c2 = st.columns(2)
-        with c1:
-            sc_relevance  = st.slider("Соответствие заданию", 1, 5, 3)
-            sc_structure  = st.slider("Структура и логика", 1, 5, 3)
-        with c2:
-            sc_argument   = st.slider("Аргументация / примеры", 1, 5, 3)
-            sc_clarity    = st.slider("Ясность изложения", 1, 5, 3)
-        comment = st.text_area("Короткий комментарий (опционально)", placeholder="Что можно улучшить?")
+            st.write("Ответ студента")
+            if "answer" in pick:
+                st.write(pick["answer"])
+            elif "answers" in pick and pick["answers"]:
+                for ans in pick["answers"]:
+                    qid = ans.get("question_id", "")
+                    atxt = (ans.get("answer") or "").strip()
+                    st.markdown(f"**{qid}**")
+                    st.write(atxt if atxt else "—")
+                    st.markdown("<hr style='border:none;border-top:1px solid #eee;margin:8px 0;' />", unsafe_allow_html=True)
+            else:
+                st.write("Ответ отсутствует.")
 
-        avg_score = round((sc_relevance + sc_structure + sc_argument + sc_clarity) / 4, 2)
-        st.info(f"Средняя оценка по критериям: **{avg_score} / 5**")
 
-        if st.button("Отправить отзыв"):
-            review = {
-                "submission_idx": pick_idx,
-                "assignment": RUBRIC["assignment_id"],
-                "reviewer": user,          
-                "scores": {
-                    "relevance": sc_relevance,
-                    "structure": sc_structure,
-                    "argument": sc_argument,
-                    "clarity": sc_clarity
-                },
-                "avg_score": avg_score,
-                "comment": comment.strip()
-            }
-            reviews = get_reviews_store()
-            reviews.append(review)
-            save_reviews_store()
+            st.markdown("### Оцените по критериям (1–5)")
+            c1, c2 = st.columns(2)
+            with c1:
+                sc_relevance  = st.slider("Соответствие заданию", 1, 5, 3)
+                sc_structure  = st.slider("Структура и логика", 1, 5, 3)
+            with c2:
+                sc_argument   = st.slider("Аргументация / примеры", 1, 5, 3)
+                sc_clarity    = st.slider("Ясность изложения", 1, 5, 3)
+            comment = st.text_area("Короткий комментарий (опционально)", placeholder="Что можно улучшить?")
 
-            award_points(user, 1)
-            save_points_store()
-            st.success("Отзыв сохранен! Вам начислено +1 очко за кросс-проверку.")
+            avg_score = round((sc_relevance + sc_structure + sc_argument + sc_clarity) / 4, 2)
+            st.info(f"Средняя оценка по критериям: **{avg_score} / 5**")
+
+            if RUBRIC and st.button("Отправить отзыв"):
+                review = {
+                    "submission_idx": pick_idx,
+                    "assignment": RUBRIC["assignment_id"],
+                    "reviewer": user,          
+                    "scores": {
+                        "relevance": sc_relevance,
+                        "structure": sc_structure,
+                        "argument": sc_argument,
+                        "clarity": sc_clarity
+                    },
+                    "avg_score": avg_score,
+                    "comment": comment.strip()
+                }
+                reviews = get_reviews_store()
+                reviews.append(review)
+                save_reviews_store()
+
+                award_points(user, 1)
+                save_points_store()
+                st.success("Отзыв сохранен! Вам начислено +1 очко за кросс-проверку.")
 
     st.markdown("---")
     st.subheader("Мои полученные отзывы")
     subs = get_submissions_store()
-    my_subms = [
+    my_subms = [] if RUBRIC is None else [
         (i, s) for i, s in enumerate(subs)
         if s.get("assignment") == RUBRIC["assignment_id"] and s.get("user") == user
     ]
@@ -540,169 +557,224 @@ with tab_submit:
     st.subheader("Выбор задания")
     RUBRIC = assignment_selector("assign_id_submit")
 
-    # RUBRIC is bound from the assignment selector (as before)
-    questions = RUBRIC.get("questions", [])
-    if not questions:
-        st.info("Для этого задания ещё не настроены вопросы.")
+    if RUBRIC is None:
+        st.info("В этом предмете ещё нет заданий. Создайте тест во вкладке 'Создание тестов'.")
     else:
-        test_type = RUBRIC.get("test_type")
-        if not test_type:
-            if any("options" in q for q in questions):
-                test_type = "multiple_choice"
-            else:
-                test_type = "keyword_based"
-        
-        if test_type == "multiple_choice":
-            # Render multiple choice questions
-            answers = {}
-            for q in questions:
-                st.markdown(f"### {q['title']}  \n*Макс. баллов: {q['max_points']}*")
-                
-                options = q.get("options", [])
-                if options:
-                    selected_option = st.radio(
-                        "Выберите правильный ответ:",
-                        options=options,
-                        key=f"ans_{RUBRIC['assignment_id']}_{q['question_id']}"
-                    )
-                    answers[q["question_id"]] = selected_option
-                else:
-                    st.warning("Нет вариантов ответов для этого вопроса")
-                    answers[q["question_id"]] = ""
-                
-                st.markdown("---")
+        # RUBRIC is bound from the assignment selector (as before)
+        questions = RUBRIC.get("questions", [])
+        # Информация о тесте и кнопка старта
+        due = RUBRIC.get("due_date")
+        tlim = RUBRIC.get("time_limit_minutes")
+        info_cols = st.columns(3)
+        info_cols[0].markdown(f"**Вопросов:** {len(questions)}")
+        info_cols[1].markdown(f"**Дедлайн:** {due if due else '—'}")
+        time_box = info_cols[2].empty()
+        time_box.markdown(f"**Время:** {tlim} мин" if tlim else "**Время:** не ограничено")
+
+        start_key = f"start_{RUBRIC['assignment_id']}"
+        started = st.session_state.get(start_key, False)
+        start_ts_key = f"start_ts_{RUBRIC['assignment_id']}"
+        time_up_key = f"time_up_{RUBRIC['assignment_id']}"
+        if not started:
+            if st.button("Начать", key=f"btn_start_{RUBRIC['assignment_id']}"):
+                st.session_state[start_key] = True
+                st.session_state[start_ts_key] = time.time()
+                st.session_state[time_up_key] = False
+                st.rerun()
         else:
-            # Render text area for keyword-based questions (original logic)
-            answers = {}
-            for q in questions:
-                st.markdown(f"### {q['title']}  \n*Макс. баллов: {q['max_points']}*")
-                answers[q["question_id"]] = st.text_area(
-                    f"Ваш ответ ({q['question_id']})",
-                    key=f"ans_{RUBRIC['assignment_id']}_{q['question_id']}",
-                    height=140
-                )
-                st.markdown("---")
-
-        if st.button("Проверить все"):
-            total_score = 0
-            total_max = sum(q["max_points"] for q in questions)
-            per_q_results = []
-
-            # Run scoring per question based on test type
-            for q in questions:
-                ans_text = answers.get(q["question_id"], "")
-                
-                if test_type == "multiple_choice":
-                    correct_answer = q.get("correct_answer", "")
-                    if ans_text == correct_answer:
-                        q_score = q["max_points"]
-                        q_details = [f"✅ Правильный ответ: +{q['max_points']} баллов"]
-                    else:
-                        q_score = 0
-                        q_details = [f"❌ Неправильный ответ: 0 баллов (правильный: {correct_answer})"]
-                    
-                    per_q_results.append({
-                        "question_id": q["question_id"],
-                        "title": q["title"],
-                        "answer": ans_text,
-                        "kw_score": q_score,
-                        "details": q_details
-                    })
-                    total_score += q_score
-                    
-                else:
-                    q_score_kw, q_details = keyword_score_for(
-                        ans_text, q["keywords"], q["max_points"]
-                    )
-                    per_q_results.append({
-                        "question_id": q["question_id"],
-                        "title": q["title"],
-                        "answer": ans_text,
-                        "kw_score": q_score_kw,
-                        "details": q_details
-                    })
-                    total_score += q_score_kw
-
-            # Optional AI refinement (only for keyword-based tests)
-            if test_type == "keyword_based":
-                use_ai = st.session_state.get("use_ai")
-                if 'use_ai' not in st.session_state:
-                    try:
-                        use_ai_local = use_ai
-                    except:
-                        use_ai_local = False
-                else:
-                    use_ai_local = st.session_state['use_ai']
-
-                ai_total_delta = 0
-                if use_ai_local:
-                    for item in per_q_results:
-                        if client is None:
-                            continue
-                        # Build a temporary one-question rubric for llm_grade
-                        one_q_rubric = {
-                            "title": f"{RUBRIC['title']} — {item['title']}",
-                            "keywords": [{"word": k["word"]} for k in next(q for q in questions if q["question_id"]==item["question_id"])["keywords"]]
-                        }
-                        with st.spinner(f"AI оценивает: {item['question_id']}"):
-                            llm_info = llm_grade(item["answer"], one_q_rubric)
-                        if llm_info:
-                            # Combine keyword score (scaled to 0–100 by question max) with AI score (0–100)
-                            # then rescale back to question max
-                            kw_pct = (item["kw_score"] / next(q for q in questions if q["question_id"]==item["question_id"])["max_points"]) * 100
-                            combined_pct = (kw_pct + llm_info["score"]) / 2
-                            combined_score = round(combined_pct / 100 * next(q for q in questions if q["question_id"]==item["question_id"])["max_points"])
-                            ai_total_delta += (combined_score - item["kw_score"])
-                            item["ai_score"] = int(round(llm_info["score"]))
-                            item["final_score"] = combined_score
-                            item["ai_feedback"] = llm_info.get("feedback", [])
-                        else:
-                            item["final_score"] = item["kw_score"]
-                    total_score += ai_total_delta  # adjust total if AI used
-                else:
-                    for item in per_q_results:
-                        item["final_score"] = item["kw_score"]
+            # Таймер, если есть лимит (обновляем, но не ререндрим до конца блока рендера)
+            if tlim and int(tlim) > 0:
+                if start_ts_key not in st.session_state:
+                    st.session_state[start_ts_key] = time.time()
+                elapsed = int(time.time() - st.session_state[start_ts_key])
+                total = int(tlim) * 60
+                remaining = max(0, total - elapsed)
+                mm = remaining // 60
+                ss = remaining % 60
+                time_box.markdown(f"**Осталось:** {mm:02d}:{ss:02d}")
+                if remaining == 0:
+                    st.session_state[time_up_key] = True
+            if not questions:
+                st.info("Для этого задания ещё не настроены вопросы.")
             else:
-                for item in per_q_results:
-                    item["final_score"] = item["kw_score"]
+                test_type = RUBRIC.get("test_type")
+                if not test_type:
+                    if any("options" in q for q in questions):
+                        test_type = "multiple_choice"
+                    else:
+                        test_type = "keyword_based"
+                
+                time_up = st.session_state.get(time_up_key, False)
+                # Формируем ответы (даже если время вышло, чтобы можно было автозавершить)
+                answers = {}
+                if test_type == "multiple_choice":
+                    # Render multiple choice questions
+                    for q in questions:
+                        st.markdown(f"### {q['title']}  \n*Макс. баллов: {q['max_points']}*")
+                        
+                        options = q.get("options", [])
+                        if options:
+                            selected_option = st.radio(
+                                "Выберите правильный ответ:",
+                                options=options,
+                                key=f"ans_{RUBRIC['assignment_id']}_{q['question_id']}"
+                            )
+                            answers[q["question_id"]] = selected_option
+                        else:
+                            st.warning("Нет вариантов ответов для этого вопроса")
+                            answers[q["question_id"]] = ""
+                        
+                        st.markdown("---")
+                else:
+                    # Render text area for keyword-based questions (original logic)
+                    for q in questions:
+                        st.markdown(f"### {q['title']}  \n*Макс. баллов: {q['max_points']}*")
+                        answers[q["question_id"]] = st.text_area(
+                            f"Ваш ответ ({q['question_id']})",
+                            key=f"ans_{RUBRIC['assignment_id']}_{q['question_id']}",
+                            height=140
+                        )
+                        st.markdown("---")
 
-            # Show per-question breakdown
-            st.success(f"Итог: {total_score}/{total_max}")
-            for item in per_q_results:
-                with st.expander(f"{item['question_id']}: {item['title']} — {item['final_score']} баллов"):
-                    st.markdown("**По ключевым словам:**")
-                    for d in item["details"]:
-                        st.write("•", d)
-                    if item.get("ai_feedback"):
-                        st.markdown("**AI-фидбек:**")
-                        for fb in item["ai_feedback"]:
-                            st.write("•", fb)
+                # Завершение: либо по кнопке, либо автоматически по таймеру
+                do_finish = False
+                if time_up:
+                    st.warning("Время выполнения теста истекло. Ответы отправлены автоматически.")
+                    # Подхватим значения из session_state, если локально пусто
+                    for q in questions:
+                        key = f"ans_{RUBRIC['assignment_id']}_{q['question_id']}"
+                        if q["question_id"] not in answers or answers[q["question_id"]] == "":
+                            answers[q["question_id"]] = st.session_state.get(key, "")
+                    do_finish = True
+                else:
+                    do_finish = st.button("Завершить")
 
-            # Award points (same rule: 1 балл за каждые ~10% итога, минимум 1)
-            pct = total_score / max(1, total_max)
-            gained = max(1, int(round(pct * 10)))
-            award_points(user, gained)
-            save_points_store()
+                if do_finish:
+                    total_score = 0
+                    total_max = sum(q["max_points"] for q in questions)
+                    per_q_results = []
 
-            # Save a multi-question submission
-            subs = get_submissions_store()
-            subs.append({
-                "user": user,
-                "assignment": RUBRIC["assignment_id"],
-                "answers": [
-                    {
-                        "question_id": item["question_id"],
-                        "answer": item["answer"],
-                        "score": item["final_score"]
-                    } for item in per_q_results
-                ],
-                "total_score": total_score,
-                "total_max": total_max,
-                "points_awarded": gained
-            })
-            save_submissions_store()
+                    # Run scoring per question based on test type
+                    for q in questions:
+                        ans_text = answers.get(q["question_id"], "")
+                        
+                        if test_type == "multiple_choice":
+                            correct_answer = q.get("correct_answer", "")
+                            if ans_text == correct_answer:
+                                q_score = q["max_points"]
+                                q_details = [f"✅ Правильный ответ: +{q['max_points']} баллов"]
+                            else:
+                                q_score = 0
+                                q_details = [f"❌ Неправильный ответ: 0 баллов (правильный: {correct_answer})"]
+                            
+                            per_q_results.append({
+                                "question_id": q["question_id"],
+                                "title": q["title"],
+                                "answer": ans_text,
+                                "kw_score": q_score,
+                                "details": q_details
+                            })
+                            total_score += q_score
+                            
+                        else:
+                            q_score_kw, q_details = keyword_score_for(
+                                ans_text, q["keywords"], q["max_points"]
+                            )
+                            per_q_results.append({
+                                "question_id": q["question_id"],
+                                "title": q["title"],
+                                "answer": ans_text,
+                                "kw_score": q_score_kw,
+                                "details": q_details
+                            })
+                            total_score += q_score_kw
 
-            st.info(f"Начислено {gained} очк.")
+                    # Optional AI refinement (only for keyword-based tests)
+                    if test_type == "keyword_based":
+                        use_ai = st.session_state.get("use_ai")
+                        if 'use_ai' not in st.session_state:
+                            try:
+                                use_ai_local = use_ai
+                            except:
+                                use_ai_local = False
+                        else:
+                            use_ai_local = st.session_state['use_ai']
+
+                        ai_total_delta = 0
+                        if use_ai_local:
+                            for item in per_q_results:
+                                if client is None:
+                                    continue
+                                # Build a temporary one-question rubric for llm_grade
+                                one_q_rubric = {
+                                    "title": f"{RUBRIC['title']} — {item['title']}",
+                                    "keywords": [{"word": k["word"]} for k in next(q for q in questions if q["question_id"]==item["question_id"])["keywords"]]
+                                }
+                                with st.spinner(f"AI оценивает: {item['question_id']}"):
+                                    llm_info = llm_grade(item["answer"], one_q_rubric)
+                                if llm_info:
+                                    # Combine keyword score (scaled to 0–100 by question max) with AI score (0–100)
+                                    # then rescale back to question max
+                                    kw_pct = (item["kw_score"] / next(q for q in questions if q["question_id"]==item["question_id"])["max_points"]) * 100
+                                    combined_pct = (kw_pct + llm_info["score"]) / 2
+                                    combined_score = round(combined_pct / 100 * next(q for q in questions if q["question_id"]==item["question_id"])["max_points"]) 
+                                    ai_total_delta += (combined_score - item["kw_score"])
+                                    item["ai_score"] = int(round(llm_info["score"]))
+                                    item["final_score"] = combined_score
+                                    item["ai_feedback"] = llm_info.get("feedback", [])
+                                else:
+                                    item["final_score"] = item["kw_score"]
+                            total_score += ai_total_delta  # adjust total if AI used
+                        else:
+                            for item in per_q_results:
+                                item["final_score"] = item["kw_score"]
+                    else:
+                        for item in per_q_results:
+                            item["final_score"] = item["kw_score"]
+
+                    # Show per-question breakdown
+                    st.success(f"Итог: {total_score}/{total_max}")
+                    for item in per_q_results:
+                        final_sc = item.get("final_score", item.get("kw_score", 0))
+                        with st.expander(f"{item['question_id']}: {item['title']} — {final_sc} баллов"):
+                            st.markdown("**По ключевым словам:**")
+                            for d in item["details"]:
+                                st.write("•", d)
+                            if item.get("ai_feedback"):
+                                st.markdown("**AI-фидбек:**")
+                                for fb in item["ai_feedback"]:
+                                    st.write("•", fb)
+
+                    # Award points (same rule: 1 балл за каждые ~10% итога, минимум 1)
+                    pct = total_score / max(1, total_max)
+                    gained = max(1, int(round(pct * 10)))
+                    award_points(user, gained)
+                    save_points_store()
+
+                    # Save a multi-question submission
+                    subs = get_submissions_store()
+                    subs.append({
+                        "user": user,
+                        "assignment": RUBRIC["assignment_id"],
+                        "answers": [
+                            {
+                                "question_id": item["question_id"],
+                                "answer": item["answer"],
+                                "score": item.get("final_score", item.get("kw_score", 0))
+                            } for item in per_q_results
+                        ],
+                        "total_score": total_score,
+                        "total_max": total_max,
+                        "points_awarded": gained
+                    })
+                    save_submissions_store()
+
+                    st.info(f"Начислено {gained} очк.")
+
+            # В самом конце: если есть таймер и он не истёк — плавно ререндерим раз в секунду
+            if tlim and int(tlim) > 0 and not st.session_state.get(time_up_key, False):
+                time.sleep(1)
+                st.rerun()
 
 
 with tab_leaderboard:
@@ -1092,6 +1164,8 @@ if current_role == "teacher":
             with col1:
                 test_title = st.text_input("Название теста", placeholder="Например: Контрольная работа №1", key="test_title_input")
                 test_subject = st.selectbox("Предмет", SUBJECTS, key="test_subject")
+                # Срок сдачи (опционально)
+                due_date = st.date_input("Срок сдачи (опционально)", key="test_due_date")
             
             with col2:
                 test_type = st.selectbox(
@@ -1101,6 +1175,7 @@ if current_role == "teacher":
                     key="test_type_selector"
                 )
                 test_description = st.text_area("Описание теста (опционально)", height=100, key="test_description_input")
+                time_limit_minutes = st.number_input("Ограничение по времени (мин)", min_value=0, max_value=1440, value=0, help="0 — без ограничения", key="test_time_limit")
                 
                 # Сохраняем тип теста в session_state
                 st.session_state.test_type = test_type
@@ -1123,6 +1198,19 @@ if current_role == "teacher":
                     "description": test_description,
                     "questions": st.session_state.get("questions", [])
                 }
+                # Сохраняем срок сдачи, если установлен
+                try:
+                    if due_date:
+                        # сериализуем как ISO-строку yyyy-mm-dd
+                        test_data["due_date"] = due_date.isoformat()
+                except Exception:
+                    pass
+                # Сохраняем таймер, если задан (>0)
+                try:
+                    if time_limit_minutes and int(time_limit_minutes) > 0:
+                        test_data["time_limit_minutes"] = int(time_limit_minutes)
+                except Exception:
+                    pass
                 
                 # Генерируем ID теста
                 test_id = generate_test_id(test_title, test_subject)
