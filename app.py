@@ -144,6 +144,86 @@ def get_materials_store():
 def safe_filename(name: str) -> str:
     return re.sub(r"[^A-Za-z0-9._\-]+", "_", name)
 
+def extract_text_from_file(file_path: str, mime_type: str) -> str:
+    """Извлекает текст из файла разных форматов"""
+    try:
+        if mime_type == "application/pdf" or file_path.lower().endswith('.pdf'):
+            import PyPDF2
+            with open(file_path, 'rb') as file:
+                pdf_reader = PyPDF2.PdfReader(file)
+                text = ""
+                for page in pdf_reader.pages:
+                    text += page.extract_text() + "\n"
+                return text.strip()
+        
+        elif mime_type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document" or file_path.lower().endswith('.docx'):
+            from docx import Document
+            doc = Document(file_path)
+            text = ""
+            for paragraph in doc.paragraphs:
+                text += paragraph.text + "\n"
+            return text.strip()
+        
+        elif mime_type == "application/vnd.openxmlformats-officedocument.presentationml.presentation" or file_path.lower().endswith('.pptx'):
+            from pptx import Presentation
+            prs = Presentation(file_path)
+            text = ""
+            for slide in prs.slides:
+                for shape in slide.shapes:
+                    if hasattr(shape, "text"):
+                        text += shape.text + "\n"
+            return text.strip()
+        
+        elif mime_type == "text/plain" or file_path.lower().endswith('.txt'):
+            with open(file_path, 'r', encoding='utf-8') as file:
+                return file.read().strip()
+        
+        else:
+            return f"Формат файла {mime_type} не поддерживается для извлечения текста"
+    
+    except Exception as e:
+        return f"Ошибка извлечения текста: {str(e)}"
+
+def generate_annotation(text: str, filename: str) -> str:
+    """Генерирует аннотацию для текста через DeepSeek API"""
+    if client is None:
+        return "AI недоступен: не найден ключ API"
+    
+    if not text or len(text.strip()) < 50:
+        return "Недостаточно текста для генерации аннотации"
+    
+    try:
+        # Ограничиваем длину текста для API (примерно 4000 символов)
+        max_length = 4000
+        if len(text) > max_length:
+            text = text[:max_length] + "..."
+        
+        system_msg = (
+            "Ты - эксперт по созданию кратких аннотаций учебных материалов. "
+            "Создай краткую аннотацию (2-4 предложения) на русском языке, которая: "
+            "1) Описывает основную тему материала "
+            "2) Выделяет ключевые понятия и идеи "
+            "3) Указывает на практическую ценность "
+            "4) Пишется понятным языком для студентов"
+        )
+        
+        user_msg = f"Файл: {filename}\n\nТекст материала:\n{text}"
+        
+        resp = client.chat.completions.create(
+            model=DEEPSEEK_MODEL,
+            temperature=0.3,
+            messages=[
+                {"role": "system", "content": system_msg},
+                {"role": "user", "content": user_msg}
+            ],
+        )
+        
+        annotation = resp.choices[0].message.content.strip()
+        return annotation
+    
+    except Exception as e:
+        return f"Ошибка генерации аннотации: {str(e)}"
+
 def get_points_store() -> dict:
     subj = current_subject()
     if subj not in st.session_state.points:
@@ -941,19 +1021,48 @@ with tab_materials:
                         st.markdown(f"<span class='badge'>Описание</span> {it['note']}", unsafe_allow_html=True)
                     st.markdown(f"<span class='muted'>Загрузил: {it.get('uploader','?')}</span>", unsafe_allow_html=True)
 
-                    # Read file for download button
-                    try:
-                        with open(it["path"], "rb") as fh:
-                            data_bytes = fh.read()
-                        st.download_button(
-                            "⬇️ Скачать",
-                            data=data_bytes,
-                            file_name=it["name"],
-                            mime=it.get("mime") or "application/octet-stream",
-                            key=f"dl_{subj}_{it['name']}"
-                        )
-                    except FileNotFoundError:
-                        st.error("Файл не найден на диске — возможно, был удалён вручную.")
+                    # Показываем аннотацию если есть
+                    if it.get("annotation"):
+                        with st.expander("📝 AI-аннотация", expanded=False):
+                            st.markdown(it["annotation"])
+
+                    # Кнопки действий
+                    col_dl, col_ai = st.columns([1, 1])
+                    
+                    with col_dl:
+                        # Read file for download button
+                        try:
+                            with open(it["path"], "rb") as fh:
+                                data_bytes = fh.read()
+                            st.download_button(
+                                "⬇️ Скачать",
+                                data=data_bytes,
+                                file_name=it["name"],
+                                mime=it.get("mime") or "application/octet-stream",
+                                key=f"dl_{subj}_{it['name']}"
+                            )
+                        except FileNotFoundError:
+                            st.error("Файл не найден на диске — возможно, был удалён вручную.")
+                    
+                    with col_ai:
+                        # Кнопка генерации аннотации
+                        if st.button("🤖 Создать аннотацию", key=f"ai_annot_{it['name']}"):
+                            with st.spinner("AI анализирует материал..."):
+                                # Извлекаем текст из файла
+                                text = extract_text_from_file(it["path"], it.get("mime", ""))
+                                
+                                if text.startswith("Ошибка") or text.startswith("Формат файла"):
+                                    st.error(text)
+                                else:
+                                    # Генерируем аннотацию
+                                    annotation = generate_annotation(text, it["name"])
+                                    
+                                    # Сохраняем аннотацию в материал
+                                    it["annotation"] = annotation
+                                    save_materials_index(idx)
+                                    
+                                    st.success("✅ Аннотация создана!")
+                                    st.rerun()
 
             # (Optional) Admin actions: simple cleanup (только для преподавателей)
             if current_role == "teacher":

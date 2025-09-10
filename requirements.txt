@@ -5,3 +5,6 @@ pandas
 PyJWT
 requests
 beautifulsoup4
+PyPDF2
+python-docx
+python-pptx
