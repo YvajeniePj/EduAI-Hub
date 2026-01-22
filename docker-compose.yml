@@ -1,0 +1,398 @@
+version: '3.8'
+
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15-alpine
+    container_name: eduai-postgres
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-eduai}
+      POSTGRES_USER: ${POSTGRES_USER:-eduai}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-eduai_password}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./database/init.sql:/docker-entrypoint-initdb.d/init.sql
+    networks:
+      - eduai-network
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-eduai}" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis
+  redis:
+    image: redis:7-alpine
+    container_name: eduai-redis
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - eduai-network
+    healthcheck:
+      test: [ "CMD", "redis-cli", "ping" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # API Gateway
+  api-gateway:
+    build:
+      context: ./services/api-gateway
+      dockerfile: Dockerfile
+    container_name: eduai-api-gateway
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-eduai}:${POSTGRES_PASSWORD:-eduai_password}@postgres:5432/${POSTGRES_DB:-eduai}
+      - REDIS_URL=redis://redis:6379
+      - SUBJECT_SERVICE_URL=http://subject-service:8001
+      - TEST_SERVICE_URL=http://test-service:8002
+      - SUBMISSION_SERVICE_URL=http://submission-service:8003
+      - MATERIAL_SERVICE_URL=http://material-service:8004
+      - VIDEO_SERVICE_URL=http://video-service:8005
+      - PEER_REVIEW_SERVICE_URL=http://peer-review-service:8006
+      - GAMIFICATION_SERVICE_URL=http://gamification-service:8007
+      - AI_SERVICE_URL=http://ai-service:8008
+      - ANALYTICS_SERVICE_URL=http://analytics-service:8009
+      - STREAMING_SERVICE_URL=http://streaming-service:8012
+      - NOTIFICATION_SERVICE_URL=http://notification-service:8010
+      - FEEDBACK_SERVICE_URL=http://feedback-service:8011
+      - LIVEKIT_URL=http://livekit:7880
+      - LIVEKIT_API_KEY=${LIVEKIT_API_KEY:-devkey}
+      - LIVEKIT_API_SECRET=${LIVEKIT_API_SECRET:-secret}
+      - PYTHONUNBUFFERED=1
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      livekit:
+        condition: service_started
+    networks:
+      - eduai-network
+    volumes:
+      - ./services/api-gateway:/app
+    command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload --reload-dir /app
+
+  # LiveKit Server
+  livekit:
+    image: livekit/livekit-server:latest
+    container_name: eduai-livekit
+    command: --config /etc/livekit.yaml
+    volumes:
+      - ./infrastructure/livekit.yaml:/etc/livekit.yaml
+    ports:
+      - "7881:7881"
+      - "50000-50100:50000-50100/udp"
+    networks:
+      - eduai-network
+
+  # Streaming Service
+  streaming-service:
+    build:
+      context: ./services/streaming-service
+      dockerfile: Dockerfile
+    container_name: eduai-streaming-service
+    ports:
+      - "8012:8012"
+    environment:
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-eduai}:${POSTGRES_PASSWORD:-eduai_password}@postgres:5432/${POSTGRES_DB:-eduai}
+      - LIVEKIT_URL=http://livekit:7880
+      - LIVEKIT_EXTERNAL_URL=https://monitoring-system.online/livekit
+      - LIVEKIT_API_KEY=${LIVEKIT_API_KEY:-devkey}
+      - LIVEKIT_API_SECRET=${LIVEKIT_API_SECRET:-secret}
+      - PYTHONUNBUFFERED=1
+    depends_on:
+      postgres:
+        condition: service_healthy
+      livekit:
+        condition: service_started
+    networks:
+      - eduai-network
+    volumes:
+      - ./services/streaming-service:/app
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8012 --reload --reload-dir /app
+
+  # Subject Service
+  subject-service:
+    build:
+      context: ./services/subject-service
+      dockerfile: Dockerfile
+    container_name: eduai-subject-service
+    ports:
+      - "8001:8001"
+    environment:
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-eduai}:${POSTGRES_PASSWORD:-eduai_password}@postgres:5432/${POSTGRES_DB:-eduai}
+      - PYTHONUNBUFFERED=1
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - eduai-network
+    volumes:
+      - ./services/subject-service:/app
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8001 --reload --reload-dir /app
+
+  # Test Service
+  test-service:
+    build:
+      context: ./services/test-service
+      dockerfile: Dockerfile
+    container_name: eduai-test-service
+    ports:
+      - "8002:8002"
+    environment:
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-eduai}:${POSTGRES_PASSWORD:-eduai_password}@postgres:5432/${POSTGRES_DB:-eduai}
+      - PYTHONUNBUFFERED=1
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - eduai-network
+    volumes:
+      - ./services/test-service:/app
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8002 --reload --reload-dir /app
+
+  # Submission Service
+  submission-service:
+    build:
+      context: ./services/submission-service
+      dockerfile: Dockerfile
+    container_name: eduai-submission-service
+    ports:
+      - "8003:8003"
+    environment:
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-eduai}:${POSTGRES_PASSWORD:-eduai_password}@postgres:5432/${POSTGRES_DB:-eduai}
+      - REDIS_URL=redis://redis:6379
+      - TEST_SERVICE_URL=http://test-service:8002
+      - AI_SERVICE_URL=http://ai-service:8008
+      - GAMIFICATION_SERVICE_URL=http://gamification-service:8007
+      - PYTHONUNBUFFERED=1
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - eduai-network
+    volumes:
+      - ./services/submission-service:/app
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8003 --reload --reload-dir /app
+
+  # Material Service
+  material-service:
+    build:
+      context: ./services/material-service
+      dockerfile: Dockerfile
+    container_name: eduai-material-service
+    ports:
+      - "8004:8004"
+    environment:
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-eduai}:${POSTGRES_PASSWORD:-eduai_password}@postgres:5432/${POSTGRES_DB:-eduai}
+      - STORAGE_PATH=/app/storage
+      - AI_SERVICE_URL=http://ai-service:8008
+      - PYTHONUNBUFFERED=1
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - eduai-network
+    volumes:
+      - ./services/material-service:/app
+      - material_storage:/app/storage
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8004 --reload --reload-dir /app
+
+  # Video Service
+  video-service:
+    build:
+      context: ./services/video-service
+      dockerfile: Dockerfile
+    container_name: eduai-video-service
+    ports:
+      - "8005:8005"
+    environment:
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-eduai}:${POSTGRES_PASSWORD:-eduai_password}@postgres:5432/${POSTGRES_DB:-eduai}
+      - PYTHONUNBUFFERED=1
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - eduai-network
+    volumes:
+      - ./services/video-service:/app
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8005 --reload --reload-dir /app
+
+  # Peer Review Service
+  peer-review-service:
+    build:
+      context: ./services/peer-review-service
+      dockerfile: Dockerfile
+    container_name: eduai-peer-review-service
+    ports:
+      - "8006:8006"
+    environment:
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-eduai}:${POSTGRES_PASSWORD:-eduai_password}@postgres:5432/${POSTGRES_DB:-eduai}
+      - SUBMISSION_SERVICE_URL=http://submission-service:8003
+      - GAMIFICATION_SERVICE_URL=http://gamification-service:8007
+      - PYTHONUNBUFFERED=1
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - eduai-network
+    volumes:
+      - ./services/peer-review-service:/app
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8006 --reload --reload-dir /app
+
+  # Gamification Service
+  gamification-service:
+    build:
+      context: ./services/gamification-service
+      dockerfile: Dockerfile
+    container_name: eduai-gamification-service
+    ports:
+      - "8007:8007"
+    environment:
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-eduai}:${POSTGRES_PASSWORD:-eduai_password}@postgres:5432/${POSTGRES_DB:-eduai}
+      - PYTHONUNBUFFERED=1
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - eduai-network
+    volumes:
+      - ./services/gamification-service:/app
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8007 --reload --reload-dir /app
+
+  # AI Service
+  ai-service:
+    build:
+      context: ./services/ai-service
+      dockerfile: Dockerfile
+    container_name: eduai-ai-service
+    ports:
+      - "8008:8008"
+    environment:
+      - GIGACHAT_API_KEY=${GIGACHAT_API_KEY:-}
+      - PYTHONUNBUFFERED=1
+    networks:
+      - eduai-network
+    volumes:
+      - ./services/ai-service:/app
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8008 --reload --reload-dir /app
+
+  # Analytics Service
+  analytics-service:
+    build:
+      context: ./services/analytics-service
+      dockerfile: Dockerfile
+    container_name: eduai-analytics-service
+    ports:
+      - "8009:8009"
+    environment:
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-eduai}:${POSTGRES_PASSWORD:-eduai_password}@postgres:5432/${POSTGRES_DB:-eduai}
+      - PYTHONUNBUFFERED=1
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - eduai-network
+    volumes:
+      - ./services/analytics-service:/app
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8009 --reload --reload-dir /app
+
+  # Notification Service
+  notification-service:
+    build:
+      context: ./services/notification-service
+      dockerfile: Dockerfile
+    container_name: eduai-notification-service
+    ports:
+      - "8010:8010"
+    environment:
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-eduai}:${POSTGRES_PASSWORD:-eduai_password}@postgres:5432/${POSTGRES_DB:-eduai}
+      - SUBMISSION_SERVICE_URL=http://submission-service:8003
+      - PYTHONUNBUFFERED=1
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - eduai-network
+    volumes:
+      - ./services/notification-service:/app
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8010 --reload --reload-dir /app
+
+  # Feedback Service
+  feedback-service:
+    build:
+      context: ./services/feedback-service
+      dockerfile: Dockerfile
+    container_name: eduai-feedback-service
+    ports:
+      - "8011:8011"
+    environment:
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-eduai}:${POSTGRES_PASSWORD:-eduai_password}@postgres:5432/${POSTGRES_DB:-eduai}
+      - PYTHONUNBUFFERED=1
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - eduai-network
+    volumes:
+      - ./services/feedback-service:/app
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8011 --reload --reload-dir /app
+
+  # Frontend (Angular)
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: eduai-frontend
+    environment:
+      - API_URL=http://api-gateway:8000
+    depends_on:
+      - api-gateway
+    networks:
+      - eduai-network
+    expose:
+      - "80"
+
+  # Nginx Reverse Proxy
+  nginx:
+    image: nginx:alpine
+    container_name: eduai-nginx
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./certbot/conf:/etc/letsencrypt:ro
+      - ./certbot/www:/var/www/certbot:ro
+    depends_on:
+      - api-gateway
+      - frontend
+    networks:
+      - eduai-network
+
+  # Certbot for SSL certificates
+  certbot:
+    image: certbot/certbot:latest
+    container_name: eduai-certbot
+    volumes:
+      - ./certbot/conf:/etc/letsencrypt
+      - ./certbot/www:/var/www/certbot
+    entrypoint: "/bin/sh -c 'trap exit TERM; while :; do certbot renew; sleep 12h & wait $${!}; done;'"
+
+volumes:
+  postgres_data:
+  redis_data:
+  material_storage:
+
+
+networks:
+  eduai-network:
+    driver: bridge
